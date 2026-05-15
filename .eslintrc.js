@@ -6,6 +6,7 @@ module.exports = {
     ecmaVersion: 2020,
     sourceType: 'module',
     project: './tsconfig.json',
+    ecmaFeatures: { jsx: true },
   },
   plugins: ['@typescript-eslint', 'sonarjs'],
   extends: [
@@ -30,5 +31,5 @@ module.exports = {
     'eqeqeq': ['error', 'always'],
     'curly': ['error', 'all'],
   },
-  ignorePatterns: ['dist/', 'node_modules/', '*.js', '**/*.test.ts'],
+  ignorePatterns: ['dist/', 'node_modules/', '*.js', '**/*.test.ts', '**/*.test.tsx'],
 };

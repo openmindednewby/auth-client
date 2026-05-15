@@ -8,12 +8,18 @@ import {
 } from './utils/buildKeycloakUrls';
 import { isTokenExpired } from './utils/isTokenExpired';
 import { parseBaseUrlFromIssuer, parseRealmFromIssuer } from './utils/parseRealmFromIssuer';
+import { normalizeTokenResponse, tokenResponseToAuthTokens } from './utils/normalizeTokenResponse';
+import { AuthEventEmitter, type AuthEventListener, type AuthEventName, type AuthEventUnsubscribe } from './events/AuthEventEmitter';
 
+import type { AuthApiClient, RawAuthLoginResponse } from './api/AuthApiClient';
 import type { AuthClientConfig } from './types/AuthClientConfig';
 import type { AuthTokens } from './types/AuthTokens';
 import type { TokenStorage } from './types/TokenStorage';
+import type { InactivityTracker } from './inactivity/InactivityTracker';
+import type { RefreshInterceptor } from './interceptor/RefreshInterceptor';
 
 const DEFAULT_SCOPE = 'openid profile email';
+const OFFLINE_ACCESS_SCOPE = 'offline_access';
 
 /**
  * Inputs to {@link AuthClient.fromIssuerUrl}.
@@ -28,20 +34,57 @@ export interface AuthClientFromIssuerInput {
   scope?: string;
 }
 
+/**
+ * Optional collaborators wired into {@link AuthClient} for the v2 surface.
+ *
+ * - `api` enables `loginWith*`, `logout`, `requestPasswordReset`,
+ *   `confirmPasswordReset`. Without it, those methods throw.
+ * - `interceptor` enables `init()` to silently refresh tokens at boot, and is
+ *   used by `loginWithOtp/Password` to mark inactivity-active.
+ * - `inactivityTracker` enforces the 90-day timeout at `init()`.
+ *
+ * Consumers can omit any/all of these — the v1 PKCE / token-storage surface
+ * keeps working unchanged.
+ */
+export interface AuthClientCollaborators {
+  api?: AuthApiClient;
+  interceptor?: RefreshInterceptor;
+  inactivityTracker?: InactivityTracker;
+  events?: AuthEventEmitter;
+}
+
+export interface LoginOptions {
+  /** When true, request `offline_access` scope so the IdP issues a long-lived refresh token. */
+  offlineAccess?: boolean;
+}
+
+export interface LogoutOptions {
+  /** Revoke all sessions on the IdP, not just the current one. */
+  everywhere?: boolean;
+}
+
 export class AuthClient {
   private readonly config: AuthClientConfig;
   private readonly tokenStorage: TokenStorage;
+  private readonly api: AuthApiClient | undefined;
+  private readonly interceptor: RefreshInterceptor | undefined;
+  private readonly inactivityTracker: InactivityTracker | undefined;
+  private readonly events: AuthEventEmitter;
 
   /**
    * @throws Error when `baseUrl`, `realm`, or `clientId` is missing or empty.
    */
-  constructor(config: AuthClientConfig, storage: TokenStorage) {
+  constructor(config: AuthClientConfig, storage: TokenStorage, collaborators: AuthClientCollaborators = {}) {
     AuthClient.validateConfig(config);
     this.config = {
       ...config,
       scope: config.scope ?? DEFAULT_SCOPE,
     };
     this.tokenStorage = storage;
+    this.api = collaborators.api;
+    this.interceptor = collaborators.interceptor;
+    this.inactivityTracker = collaborators.inactivityTracker;
+    this.events = collaborators.events ?? new AuthEventEmitter();
   }
 
   /**
@@ -51,7 +94,11 @@ export class AuthClient {
    *
    * @throws Error when the issuer URL doesn't match `{base}/realms/{realm}`.
    */
-  static fromIssuerUrl(input: AuthClientFromIssuerInput, storage: TokenStorage): AuthClient {
+  static fromIssuerUrl(
+    input: AuthClientFromIssuerInput,
+    storage: TokenStorage,
+    collaborators: AuthClientCollaborators = {},
+  ): AuthClient {
     const realm = parseRealmFromIssuer(input.issuerUrl);
     const baseUrl = parseBaseUrlFromIssuer(input.issuerUrl);
     if (realm === null || baseUrl === null || baseUrl === '') {
@@ -66,6 +113,7 @@ export class AuthClient {
         scope: input.scope,
       },
       storage,
+      collaborators,
     );
   }
 
@@ -132,6 +180,7 @@ export class AuthClient {
     state?: string;
     codeChallenge?: string;
     codeChallengeMethod?: 'S256' | 'plain';
+    offlineAccess?: boolean;
   } = {}): string {
     if (typeof this.config.redirectUri !== 'string' || this.config.redirectUri === '') {
       throw new Error('AuthClient.buildAuthorizationUrl: redirectUri is required');
@@ -141,7 +190,7 @@ export class AuthClient {
       realm: this.realm,
       clientId: this.clientId,
       redirectUri: this.config.redirectUri,
-      scope: this.scope,
+      scope: this.resolveScope(input.offlineAccess),
       state: input.state,
       codeChallenge: input.codeChallenge,
       codeChallengeMethod: input.codeChallengeMethod,
@@ -173,5 +222,117 @@ export class AuthClient {
       return null;
     }
     return tokens.accessToken;
+  }
+
+  /** Subscribe to lifecycle events (currently `sessionExpired` only). */
+  on(event: AuthEventName, listener: AuthEventListener): AuthEventUnsubscribe {
+    return this.events.on(event, listener);
+  }
+
+  /**
+   * Boot-time wiring. Checks the inactivity tracker; if expired, clears
+   * tokens and emits `sessionExpired`. Returns whether a usable session
+   * survived.
+   */
+  async init(): Promise<{ hasSession: boolean }> {
+    if (this.inactivityTracker !== undefined) {
+      const expired = await this.inactivityTracker.isExpired();
+      if (expired) {
+        await this.tokenStorage.clear();
+        await this.inactivityTracker.clear();
+        this.events.emit('sessionExpired');
+        return { hasSession: false };
+      }
+    }
+    const tokens = await this.tokenStorage.read();
+    return { hasSession: tokens !== null };
+  }
+
+  /**
+   * Trigger a refresh via the configured interceptor. Returns the new tokens
+   * or `null` when the refresh failed (in which case `sessionExpired` has
+   * already fired).
+   *
+   * @throws Error when no interceptor is configured.
+   */
+  async refresh(): Promise<AuthTokens | null> {
+    if (this.interceptor === undefined) {
+      throw new Error('AuthClient.refresh: no RefreshInterceptor configured');
+    }
+    return this.interceptor.refreshTokens();
+  }
+
+  async loginWithOtp(input: { email: string; otp: string; tenantId?: string } & LoginOptions): Promise<AuthTokens> {
+    return this.runLogin(this.requireApi().loginWithOtp({
+      email: input.email,
+      otp: input.otp,
+      tenantId: input.tenantId,
+      offlineAccess: input.offlineAccess ?? false,
+    }));
+  }
+
+  async loginWithPassword(
+    input: { email: string; password: string; tenantId?: string } & LoginOptions,
+  ): Promise<AuthTokens> {
+    return this.runLogin(this.requireApi().loginWithPassword({
+      email: input.email,
+      password: input.password,
+      tenantId: input.tenantId,
+      offlineAccess: input.offlineAccess ?? false,
+    }));
+  }
+
+  async logout(options: LogoutOptions = {}): Promise<void> {
+    const api = this.requireApi();
+    try {
+      await api.logout(options.everywhere ?? false);
+    } finally {
+      await this.tokenStorage.clear();
+      if (this.inactivityTracker !== undefined) {
+        await this.inactivityTracker.clear();
+      }
+    }
+  }
+
+  async requestPasswordReset(input: { email: string; tenantId?: string }): Promise<void> {
+    return this.requireApi().forgotPassword({ email: input.email, tenantId: input.tenantId });
+  }
+
+  async confirmPasswordReset(input: { token: string; newPassword: string }): Promise<void> {
+    return this.requireApi().resetPassword({ token: input.token, newPassword: input.newPassword });
+  }
+
+  /** Internal: run a login HTTP call, persist tokens, mark inactivity-active. */
+  private async runLogin(promise: Promise<RawAuthLoginResponse>): Promise<AuthTokens> {
+    const raw = await promise;
+    if (typeof raw.access_token !== 'string' || raw.access_token === '') {
+      throw new Error('AuthClient: login response missing access_token');
+    }
+    // After the guard above, raw.access_token is `string`; widen the optional-shaped
+    // RawAuthLoginResponse into the strict RawTokenResponse the normaliser expects.
+    const normalized = normalizeTokenResponse({ ...raw, access_token: raw.access_token });
+    const tokens = tokenResponseToAuthTokens(normalized);
+    await this.tokenStorage.write(tokens);
+    if (this.inactivityTracker !== undefined) {
+      await this.inactivityTracker.markActive();
+    }
+    return tokens;
+  }
+
+  private requireApi(): AuthApiClient {
+    if (this.api === undefined) {
+      throw new Error('AuthClient: no AuthApiClient configured');
+    }
+    return this.api;
+  }
+
+  private resolveScope(offlineAccess?: boolean): string {
+    if (offlineAccess !== true) {
+      return this.scope;
+    }
+    if (this.scope.includes(OFFLINE_ACCESS_SCOPE)) {
+      return this.scope;
+    }
+    return `${this.scope} ${OFFLINE_ACCESS_SCOPE}`.trim();
   }
 }

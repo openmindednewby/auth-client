@@ -1,10 +1,12 @@
 # @dloizides/auth-client
 
-Realm-aware Keycloak / OIDC helpers for the dloizides.com portfolio. Takes `realm` and `clientId` as config — never hardcodes them — so the same package serves every product (Questioner, OnlineMenu, future apps) with its own Keycloak realm.
+Realm-aware Keycloak / OIDC client for the dloizides.com portfolio. v2 extends the v1 PKCE / token-storage core with platform-specific adapters (cookie web, secure-store mobile, biometric gate), silent token refresh with single-flight, inactivity enforcement, password reset, and React Query hooks for sessions management.
 
-## Why
+## Why one package across four products
 
-Phase 2 of the Questioner ⇄ OnlineMenu product split puts each product on its own Keycloak realm. A Questioner-realm token must never be accepted by the OnlineMenu service, and vice versa. This package centralises every realm-aware concern (URL derivation, PKCE flow building blocks, token persistence, JWT decoding, user normalisation) so each app instance is wired to exactly one realm via constructor config.
+Phase 2 of the Questioner ⇄ OnlineMenu split puts each product on its own Keycloak realm. A Questioner-realm token must never be accepted by the OnlineMenu service, and vice versa. The v1 surface centralised every realm-aware concern (URL derivation, PKCE building blocks, token persistence, JWT decoding, user normalisation) so each app instance is wired to exactly one realm via constructor config.
+
+v2 widens that to **all** auth machinery: persistent sessions, refresh, biometric gating, sessions list/revoke, password reset, login orchestration. Same library, configured per-platform via adapters. Adding a fifth product or a new mobile app means picking the right adapter and going.
 
 ## Install
 
@@ -12,81 +14,175 @@ Phase 2 of the Questioner ⇄ OnlineMenu product split puts each product on its 
 npm install @dloizides/auth-client
 ```
 
-## Quick start
+Optional peer dependencies:
+
+| Peer | Required when |
+|------|---------------|
+| `react` (`>=17`) | Importing from `@dloizides/auth-client/react` |
+| `@tanstack/react-query` (`^5`) | Importing from `@dloizides/auth-client/react` |
+| `expo-secure-store` | Using `SecureStoreTokenStorage` (mobile only) |
+| `expo-local-authentication` | Using `BiometricGate` (mobile only) |
+
+Web bundles never pull in `expo-*` packages — those modules import via injected adapter interfaces, not direct module references.
+
+## Quick start (web, cookie auth)
 
 ```ts
 import {
   AuthClient,
-  BrowserStorageTokenStorage,
-  normalizeKeycloakUser,
+  AuthApiClient,
+  RefreshInterceptor,
+  InactivityTracker,
+  AuthEventEmitter,
+  CookieTokenStorage,
+  createFetchHttpClient,
+  tokenResponseToAuthTokens,
+  normalizeTokenResponse,
 } from '@dloizides/auth-client';
 
-const storage = new BrowserStorageTokenStorage({ storage: localStorage });
+const events = new AuthEventEmitter();
+const storage = new CookieTokenStorage();
+const http = createFetchHttpClient(window.fetch.bind(window));
+const api = new AuthApiClient({
+  http,
+  baseUrl: 'https://api.dloizides.com',
+  useCredentials: true,                 // sends the __Host-refresh cookie
+  getAccessToken: () => storage.read().then((t) => t?.accessToken ?? null),
+});
+
+const interceptor = new RefreshInterceptor({
+  storage,
+  events,
+  refresh: async () => {
+    const raw = await api.refreshCookie();
+    if (typeof raw.access_token !== 'string' || raw.access_token === '') return null;
+    return tokenResponseToAuthTokens(normalizeTokenResponse({ ...raw, access_token: raw.access_token }));
+  },
+  onRefreshSuccess: () => inactivity.markActive(),
+});
+
+const inactivity = new InactivityTracker({ store: yourInactivityStore });
 
 const auth = new AuthClient(
   {
     baseUrl: 'https://identity.dloizides.com',
-    realm: 'OnlineMenu',         // product-specific
+    realm: 'OnlineMenu',
     clientId: 'online-menu-client',
     redirectUri: 'http://localhost:8082',
     scope: 'openid profile email offline_access',
   },
   storage,
+  { api, interceptor, inactivityTracker: inactivity, events },
 );
 
-// Derived URLs (always realm-aware):
-auth.issuerUrl;              // https://identity.dloizides.com/realms/OnlineMenu
-auth.tokenEndpoint;          // .../realms/OnlineMenu/protocol/openid-connect/token
-auth.userInfoEndpoint;       // .../realms/OnlineMenu/protocol/openid-connect/userinfo
-auth.buildAuthorizationUrl({ state: 'xyz', codeChallenge: 'abc' });
+events.on('sessionExpired', () => navigate('/login'));
+const { hasSession } = await auth.init();
 ```
 
-### Migrating from a legacy issuer URL
-
-If your app currently stores only an issuer URL like `https://identity.dloizides.com/realms/OnlineMenu`, derive the realm and base URL automatically:
+## Quick start (mobile, secure-store)
 
 ```ts
-const auth = AuthClient.fromIssuerUrl(
-  {
-    issuerUrl: process.env.KEYCLOAK_ISSUER!,
-    clientId: 'online-menu-client',
+import * as SecureStore from 'expo-secure-store';
+import * as LocalAuthentication from 'expo-local-authentication';
+import {
+  AuthClient,
+  AuthApiClient,
+  BiometricGate,
+  InactivityTracker,
+  RefreshInterceptor,
+  SecureStoreTokenStorage,
+  AuthEventEmitter,
+  createFetchHttpClient,
+} from '@dloizides/auth-client';
+
+const events = new AuthEventEmitter();
+
+const biometricGate = new BiometricGate({
+  localAuth: {
+    hasHardwareAsync: LocalAuthentication.hasHardwareAsync,
+    isEnrolledAsync: LocalAuthentication.isEnrolledAsync,
+    authenticateAsync: (opts) => LocalAuthentication.authenticateAsync(opts),
   },
-  storage,
-);
+  flagStore: yourBiometricFlagStore, // optional persistence for the user's opt-in
+});
+
+const storage = new SecureStoreTokenStorage({
+  secureStore: {
+    getItemAsync: SecureStore.getItemAsync,
+    setItemAsync: SecureStore.setItemAsync,
+    deleteItemAsync: SecureStore.deleteItemAsync,
+  },
+  requireAuthentication: true,
+  biometricGate,
+});
+
+await biometricGate.hydrate();
 ```
+
+## React Query hooks
+
+```ts
+import { useSessions, useRevokeSession, useLogoutEverywhere, useForgotPassword, useResetPassword } from '@dloizides/auth-client/react';
+
+const { data: sessions, isLoading } = useSessions({ api });
+const revoke = useRevokeSession({ api });
+const logoutEverywhere = useLogoutEverywhere({ client: auth });
+const forgot = useForgotPassword({ api });
+const reset = useResetPassword({ api });
+
+// In your component
+revoke.mutate(sessionId);
+logoutEverywhere.mutate();
+forgot.mutate({ email });
+reset.mutate({ token, newPassword });
+```
+
+## Lifecycle events
+
+`AuthEventEmitter` exposes a `sessionExpired` event:
+
+```ts
+auth.on('sessionExpired', () => {
+  navigate('/login');
+});
+```
+
+`sessionExpired` fires when:
+
+- The inactivity tracker reports the session has aged past `maxInactivityDays` (during `auth.init()`).
+- A refresh attempt fails (`RefreshInterceptor` clears storage and emits the event exactly once per attempt, even when joined by N concurrent waiters).
 
 ## What's in the box
 
-### Class
+### Core (`@dloizides/auth-client`)
 
-- `AuthClient` — realm-aware container for config + storage. Exposes `issuerUrl`, `authorizationEndpoint`, `tokenEndpoint`, `userInfoEndpoint`, `logoutEndpoint`, `buildAuthorizationUrl()`, `getAccessToken()`, `getTokens()` / `setTokens()` / `clearTokens()`.
+- `AuthClient` — realm-aware orchestrator. `init()`, `refresh()`, `loginWithOtp()`, `loginWithPassword()`, `logout({ everywhere })`, `requestPasswordReset()`, `confirmPasswordReset()`, plus the v1 surface (`getAccessToken`, `getTokens`, `setTokens`, `clearTokens`, `buildAuthorizationUrl`, etc.).
+- `AuthApiClient` — typed wrapper for IdentityService auth endpoints.
+- `AuthEventEmitter` — `sessionExpired` event.
+- `RefreshInterceptor` — single-flight refresh queue.
+- `InactivityTracker` — 90-day default timeout (configurable).
+- Storage adapters: `InMemoryTokenStorage`, `BrowserStorageTokenStorage`, `CookieTokenStorage`, `SecureStoreTokenStorage`.
+- `BiometricGate` — wraps `expo-local-authentication`. 3-strikes lockout default.
+- `createFetchHttpClient(fetch)` — `HttpClient` factory.
+- All v1 pure helpers (URL builders, token body builders, JWT decoder, user normaliser).
 
-### Token storage adapters
+### React (`@dloizides/auth-client/react`)
 
-- `InMemoryTokenStorage` — for tests and SSR.
-- `BrowserStorageTokenStorage` — wraps any `Storage`-shaped backend (`localStorage`, `sessionStorage`, AsyncStorage shim).
+- `useForgotPassword`, `useResetPassword` — mutation hooks.
+- `useSessions` — query hook with exported `SESSIONS_QUERY_KEY`.
+- `useRevokeSession`, `useLogoutEverywhere` — mutation hooks that auto-invalidate the sessions query.
 
-Bring your own implementation by satisfying the `TokenStorage` interface (`read` / `write` / `clear`).
+## Architecture decisions baked in
 
-### Pure helpers (zero-dependency, fully tested)
-
-- `parseRealmFromIssuer(url)` / `parseBaseUrlFromIssuer(url)` — split a Keycloak issuer URL.
-- `buildIssuerUrl`, `buildAuthorizationEndpoint`, `buildTokenEndpoint`, `buildUserInfoEndpoint`, `buildLogoutEndpoint`, `buildAuthorizationUrl` — realm-aware URL builders.
-- `buildAuthorizationCodeBody`, `buildRefreshTokenBody` — `application/x-www-form-urlencoded` body helpers for the token endpoint.
-- `extractAuthCode(response)` — pull the `code` out of an `expo-auth-session` (or browser) redirect response.
-- `normalizeTokenResponse(raw)` / `tokenResponseToAuthTokens(response)` — snake_case → camelCase + absolute `expiresAt` computation.
-- `isTokenExpired(tokens, leewayMs?, now?)` / `computeExpiresAt(expiresIn, now?)` — clock-aware expiry checks with default 30 s leeway.
-- `decodeJwt<T>(token)` — base64url-decode the payload of a compact JWT (no signature verification — UI only).
-- `normalizeKeycloakUser(userInfo)` — collapse Keycloak `realm_access` + `resource_access` roles into a deduplicated `roles[]` array, pick a sensible `displayName` / `username`.
-
-### Types
-
-- `AuthClientConfig`, `AuthTokens`, `TokenStorage`, `RawTokenResponse`, `TokenResponse`
-- `KeycloakUserInfo`, `NormalizedUser`, `KeycloakRoles` (`const enum` + `isKeycloakRole` guard)
+1. **Biometric is opt-in** via `BiometricGate.setEnabled(true)`. Default off so a fresh install doesn't gate the user behind a hardware prompt.
+2. **Inactivity timeout default 90 days** (configurable). Mobile tasks chose this number; web matches.
+3. **Single account per device.** The package has no multi-account surface — one refresh-token slot, period.
+4. **No `react-native` import in package core.** RN-specific code lives in adapters that take injected interfaces (`SecureStoreLike`, `LocalAuthLike`). Web bundles don't pay for what they don't use.
+5. **Cookie refresh material is server-managed.** `CookieTokenStorage.write()` discards `refreshToken` from the JS heap on purpose — refresh swaps go via `/auth/refresh-cookie` with `credentials: 'include'`.
 
 ## Coverage
 
-100% statements / branches / functions / lines. Test runner: Jest with `ts-jest`.
+100% statements / branches / functions / lines (290 tests). Test runner: Jest with `ts-jest`.
 
 ## License
 

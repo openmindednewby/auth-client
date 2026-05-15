@@ -8,7 +8,12 @@
 
 // Class
 export { AuthClient } from './AuthClient';
-export type { AuthClientFromIssuerInput } from './AuthClient';
+export type {
+  AuthClientCollaborators,
+  AuthClientFromIssuerInput,
+  LoginOptions,
+  LogoutOptions,
+} from './AuthClient';
 
 // Types
 export type {
@@ -29,6 +34,50 @@ export {
   type StorageLike,
 } from './storage/BrowserStorageTokenStorage';
 export { InMemoryTokenStorage } from './storage/InMemoryTokenStorage';
+export { CookieTokenStorage } from './storage/CookieTokenStorage';
+export {
+  SecureStoreTokenStorage,
+  type SecureStoreTokenStorageOptions,
+  type SecureStoreLike,
+  type BiometricGateLike,
+} from './storage/SecureStoreTokenStorage';
+
+// Biometric
+export {
+  BiometricGate,
+  type BiometricGateOptions,
+  type BiometricFlagStore,
+  type LocalAuthLike,
+} from './biometric/BiometricGate';
+
+// Refresh interceptor
+export { RefreshInterceptor, type RefreshFn, type RefreshInterceptorOptions } from './interceptor/RefreshInterceptor';
+
+// Inactivity tracker
+export { InactivityTracker, type InactivityStore, type InactivityTrackerOptions } from './inactivity/InactivityTracker';
+
+// Events
+export {
+  AuthEventEmitter,
+  type AuthEventListener,
+  type AuthEventName,
+  type AuthEventUnsubscribe,
+} from './events/AuthEventEmitter';
+
+// HTTP transport
+export { createFetchHttpClient, type HttpClient, type HttpRequest, type HttpResponse } from './http/HttpClient';
+
+// API client
+export {
+  AuthApiClient,
+  type AuthApiClientOptions,
+  type AuthSessionInfo,
+  type ForgotPasswordRequest,
+  type OtpLoginRequest,
+  type PasswordLoginRequest,
+  type RawAuthLoginResponse,
+  type ResetPasswordRequest,
+} from './api/AuthApiClient';
 
 // Pure helpers
 export { normalizeKeycloakUser } from './utils/normalizeKeycloakUser';
