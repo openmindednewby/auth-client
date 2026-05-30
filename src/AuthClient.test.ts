@@ -523,6 +523,152 @@ describe('AuthClient.requestPasswordReset', () => {
   });
 });
 
+describe('AuthClient.isDirectMode (v2.1)', () => {
+  it('returns false by default (backwards-compatible)', () => {
+    const client = new AuthClient(VALID_CONFIG, new InMemoryTokenStorage());
+    expect(client.isDirectMode()).toBe(false);
+  });
+
+  it('returns true when useDirectKcAuth: true is set in config', () => {
+    const client = new AuthClient(
+      { ...VALID_CONFIG, useDirectKcAuth: true },
+      new InMemoryTokenStorage(),
+    );
+    expect(client.isDirectMode()).toBe(true);
+  });
+
+  it('returns false when useDirectKcAuth: false is explicit', () => {
+    const client = new AuthClient(
+      { ...VALID_CONFIG, useDirectKcAuth: false },
+      new InMemoryTokenStorage(),
+    );
+    expect(client.isDirectMode()).toBe(false);
+  });
+});
+
+describe('AuthClient.acceptDirectKcTokens (v2.1)', () => {
+  it('persists tokens and fires onTokenAcquired', async () => {
+    const storage = new InMemoryTokenStorage();
+    const onTokenAcquired = jest.fn();
+    const client = new AuthClient(VALID_CONFIG, storage, { onTokenAcquired });
+    const result = await client.acceptDirectKcTokens({
+      accessToken: 'a-tok',
+      refreshToken: 'r-tok',
+      expiresIn: 300,
+    });
+    expect(result.accessToken).toBe('a-tok');
+    expect(await storage.read()).toEqual(result);
+    expect(onTokenAcquired).toHaveBeenCalledWith(result);
+  });
+
+  it('marks the inactivity tracker active', async () => {
+    const storage = new InMemoryTokenStorage();
+    const { store, state } = createInactivityStore();
+    const tracker = new InactivityTracker({ store, now: () => 9_999 });
+    const client = new AuthClient(VALID_CONFIG, storage, { inactivityTracker: tracker });
+    await client.acceptDirectKcTokens({ accessToken: 'a', expiresIn: 60 });
+    expect(state.value).toBe(9_999);
+  });
+
+  it('does not require onTokenAcquired (it is optional)', async () => {
+    const client = new AuthClient(VALID_CONFIG, new InMemoryTokenStorage());
+    const result = await client.acceptDirectKcTokens({ accessToken: 'a', expiresIn: 60 });
+    expect(result.accessToken).toBe('a');
+  });
+});
+
+describe('AuthClient.acceptDirectKcRefresh (v2.1)', () => {
+  it('persists tokens and fires onTokenRefreshed', async () => {
+    const storage = new InMemoryTokenStorage();
+    const onTokenRefreshed = jest.fn();
+    const client = new AuthClient(VALID_CONFIG, storage, { onTokenRefreshed });
+    const result = await client.acceptDirectKcRefresh({
+      accessToken: 'a2',
+      refreshToken: 'r2',
+      expiresIn: 300,
+    });
+    expect(result.accessToken).toBe('a2');
+    expect(await storage.read()).toEqual(result);
+    expect(onTokenRefreshed).toHaveBeenCalledWith(result);
+  });
+
+  it('marks the inactivity tracker active on refresh', async () => {
+    const storage = new InMemoryTokenStorage();
+    const { store, state } = createInactivityStore();
+    const tracker = new InactivityTracker({ store, now: () => 7_777 });
+    const client = new AuthClient(VALID_CONFIG, storage, { inactivityTracker: tracker });
+    await client.acceptDirectKcRefresh({ accessToken: 'a', expiresIn: 60 });
+    expect(state.value).toBe(7_777);
+  });
+
+  it('does not require onTokenRefreshed (it is optional)', async () => {
+    const client = new AuthClient(VALID_CONFIG, new InMemoryTokenStorage());
+    const result = await client.acceptDirectKcRefresh({ accessToken: 'a', expiresIn: 60 });
+    expect(result.accessToken).toBe('a');
+  });
+});
+
+describe('AuthClient observability hooks (v2.1)', () => {
+  it('fires onTokenAcquired after a successful loginWithOtp', async () => {
+    const storage = new InMemoryTokenStorage();
+    const mock = createMockHttp({
+      status: 200,
+      ok: true,
+      data: { access_token: 'tok', expires_in: 60 },
+    });
+    const api = new AuthApiClient({ http: mock.http, baseUrl: 'https://api.test' });
+    const onTokenAcquired = jest.fn();
+    const client = new AuthClient(VALID_CONFIG, storage, { api, onTokenAcquired });
+    await client.loginWithOtp({ email: 'a@b.c', otp: '1' });
+    expect(onTokenAcquired).toHaveBeenCalledTimes(1);
+    expect(onTokenAcquired.mock.calls[0]?.[0]?.accessToken).toBe('tok');
+  });
+
+  it('fires onTokenAcquired after a successful loginWithPassword', async () => {
+    const storage = new InMemoryTokenStorage();
+    const mock = createMockHttp({
+      status: 200,
+      ok: true,
+      data: { access_token: 'tok-p', expires_in: 60 },
+    });
+    const api = new AuthApiClient({ http: mock.http, baseUrl: 'https://api.test' });
+    const onTokenAcquired = jest.fn();
+    const client = new AuthClient(VALID_CONFIG, storage, { api, onTokenAcquired });
+    await client.loginWithPassword({ email: 'a@b.c', password: 'pw' });
+    expect(onTokenAcquired).toHaveBeenCalledTimes(1);
+  });
+
+  it('fires onTokenRefreshed after a successful interceptor refresh', async () => {
+    const storage = new InMemoryTokenStorage();
+    const events = new AuthEventEmitter();
+    const onTokenRefreshed = jest.fn();
+    const refresh: RefreshFn = jest.fn().mockResolvedValue(TOKENS);
+    const interceptor = new RefreshInterceptor({ storage, events, refresh });
+    const client = new AuthClient(VALID_CONFIG, storage, {
+      interceptor,
+      events,
+      onTokenRefreshed,
+    });
+    await client.refresh();
+    expect(onTokenRefreshed).toHaveBeenCalledWith(TOKENS);
+  });
+
+  it('does not fire onTokenRefreshed when interceptor returns null', async () => {
+    const storage = new InMemoryTokenStorage();
+    const events = new AuthEventEmitter();
+    const onTokenRefreshed = jest.fn();
+    const refresh: RefreshFn = jest.fn().mockResolvedValue(null);
+    const interceptor = new RefreshInterceptor({ storage, events, refresh });
+    const client = new AuthClient(VALID_CONFIG, storage, {
+      interceptor,
+      events,
+      onTokenRefreshed,
+    });
+    await client.refresh();
+    expect(onTokenRefreshed).not.toHaveBeenCalled();
+  });
+});
+
 describe('AuthClient.confirmPasswordReset', () => {
   it('throws when no api is configured', async () => {
     const client = new AuthClient(VALID_CONFIG, new InMemoryTokenStorage());

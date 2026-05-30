@@ -11,9 +11,28 @@ export { AuthClient } from './AuthClient';
 export type {
   AuthClientCollaborators,
   AuthClientFromIssuerInput,
+  DirectKcOptions,
   LoginOptions,
   LogoutOptions,
 } from './AuthClient';
+
+// OIDC primitives (v2.1.0) — also available as a sub-path import
+// `@dloizides/auth-client/oidc` so non-React consumers can tree-shake the
+// `AuthClient` class away entirely.
+export {
+  clearDiscoveryCache,
+  deriveCodeChallenge,
+  exchangeAuthorizationCode,
+  fetchDiscoveryDocument,
+  generateCodeVerifier,
+  generatePkcePair,
+  refreshAccessToken,
+  type ExchangeAuthorizationCodeInput,
+  type FetchDiscoveryDocumentInput,
+  type OidcDiscoveryDocument,
+  type PkcePair,
+  type RefreshAccessTokenInput,
+} from './oidc';
 
 // Types
 export type {
@@ -78,6 +97,25 @@ export {
   type RawAuthLoginResponse,
   type ResetPasswordRequest,
 } from './api/AuthApiClient';
+
+// BFF client (v3) — same-origin client for a per-app Backend-For-Frontend.
+// The recommended auth surface: the BFF holds tokens server-side, the browser
+// holds only an httpOnly cookie. The direct-KC exports above remain for
+// consumers that still do client-side ROPC (deprecated; removed in a later
+// phase once every app is on the BFF).
+export {
+  BffAuthClient,
+  type BffAuthClientOptions,
+  type BffForgotPasswordRequest,
+  type BffLoginRequest,
+  type BffOtpRequestRequest,
+  type BffOtpRequestResult,
+  type BffOtpVerifyRequest,
+  type BffPinLoginRequest,
+  type BffRegisterRequest,
+  type BffResetPasswordRequest,
+  type BffUser,
+} from './bff/BffAuthClient';
 
 // Pure helpers
 export { normalizeKeycloakUser } from './utils/normalizeKeycloakUser';

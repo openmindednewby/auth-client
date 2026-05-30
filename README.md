@@ -119,6 +119,41 @@ const storage = new SecureStoreTokenStorage({
 await biometricGate.hydrate();
 ```
 
+## BFF auth (v3 — recommended)
+
+`BffAuthClient` is the same-origin client for a per-app **Backend-For-Frontend**
+(`bff-katalogos`, `bff-erevna`). The BFF terminates authentication
+server-side: it does ROPC against Keycloak with a confidential client, stores
+the tokens in a Redis vault, and hands the browser only an opaque httpOnly
+session cookie. The SPA never sees a token — an XSS cannot exfiltrate one.
+
+`BffAuthClient` does **no token handling**: every call is a same-origin
+`fetch` with `credentials: 'include'`, and state-changing calls carry the
+`X-BFF-Csrf: 1` header the BFF anti-forgery middleware requires.
+
+```ts
+import { BffAuthClient, createFetchHttpClient } from '@dloizides/auth-client';
+
+const bff = new BffAuthClient({
+  http: createFetchHttpClient(window.fetch.bind(window)),
+  // baseUrl defaults to '' (same-origin) — the production wiring.
+});
+
+// Login — the BFF does ROPC server-side and sets the session cookie.
+const user = await bff.login({ username, password });
+
+// Bootstrap on app load — null when there is no live session.
+const current = await bff.getCurrentUser();
+
+await bff.register({ firstName, lastName, username, email, password, tenantName });
+await bff.forgotPassword({ email, resetUrlTemplate });
+await bff.resetPassword({ token, newPassword });
+await bff.logout();
+```
+
+The direct-KC `AuthClient` / ROPC surface below is retained for consumers not
+yet on a BFF; it is deprecated and removed once every app has migrated.
+
 ## React Query hooks
 
 ```ts
@@ -156,7 +191,8 @@ auth.on('sessionExpired', () => {
 
 ### Core (`@dloizides/auth-client`)
 
-- `AuthClient` — realm-aware orchestrator. `init()`, `refresh()`, `loginWithOtp()`, `loginWithPassword()`, `logout({ everywhere })`, `requestPasswordReset()`, `confirmPasswordReset()`, plus the v1 surface (`getAccessToken`, `getTokens`, `setTokens`, `clearTokens`, `buildAuthorizationUrl`, etc.).
+- `BffAuthClient` — same-origin client for a per-app Backend-For-Frontend. `login()`, `logout()`, `getCurrentUser()`, `register()`, `forgotPassword()`, `resetPassword()`. No token handling — the BFF owns tokens, the browser owns only an httpOnly cookie. **The recommended auth surface (v3).**
+- `AuthClient` — realm-aware orchestrator. `init()`, `refresh()`, `loginWithOtp()`, `loginWithPassword()`, `logout({ everywhere })`, `requestPasswordReset()`, `confirmPasswordReset()`, plus the v1 surface (`getAccessToken`, `getTokens`, `setTokens`, `clearTokens`, `buildAuthorizationUrl`, etc.). Direct-KC ROPC; deprecated in favour of `BffAuthClient`.
 - `AuthApiClient` — typed wrapper for IdentityService auth endpoints.
 - `AuthEventEmitter` — `sessionExpired` event.
 - `RefreshInterceptor` — single-flight refresh queue.

@@ -17,6 +17,7 @@ import type { AuthTokens } from './types/AuthTokens';
 import type { TokenStorage } from './types/TokenStorage';
 import type { InactivityTracker } from './inactivity/InactivityTracker';
 import type { RefreshInterceptor } from './interceptor/RefreshInterceptor';
+import type { TokenResponse } from './types/TokenResponse';
 
 const DEFAULT_SCOPE = 'openid profile email';
 const OFFLINE_ACCESS_SCOPE = 'offline_access';
@@ -51,6 +52,35 @@ export interface AuthClientCollaborators {
   interceptor?: RefreshInterceptor;
   inactivityTracker?: InactivityTracker;
   events?: AuthEventEmitter;
+  /**
+   * Observability hook fired when a fresh token bundle has been acquired
+   * (any login path: OTP, password, or direct-KC PKCE). For app-side
+   * analytics/logging only — NOT for BFF integration (Phase 2 designs that
+   * fresh).
+   */
+  onTokenAcquired?: (tokens: AuthTokens) => void;
+  /**
+   * Observability hook fired when an existing token bundle has been
+   * refreshed. For app-side analytics/logging only.
+   */
+  onTokenRefreshed?: (tokens: AuthTokens) => void;
+}
+
+/**
+ * Direct-to-KC (PKCE) routing flag added in v2.1.0.
+ *
+ * When `true`, `AuthClient` consumers can route their PKCE auth code through
+ * the shared OIDC primitives (`exchangeAuthorizationCodeViaOidc`,
+ * `refreshTokensViaOidc`) instead of the proxied identity-api `/auth/login`
+ * + `/auth/refresh` flow.
+ *
+ * Default `false` — v2.0 behavior unchanged.
+ *
+ * The flag is read-only at runtime (`isDirectMode()`) so apps can render
+ * conditionally on whether they've opted in.
+ */
+export interface DirectKcOptions {
+  useDirectKcAuth?: boolean;
 }
 
 export interface LoginOptions {
@@ -65,26 +95,88 @@ export interface LogoutOptions {
 
 export class AuthClient {
   private readonly config: AuthClientConfig;
+  private readonly directKcAuth: boolean;
   private readonly tokenStorage: TokenStorage;
   private readonly api: AuthApiClient | undefined;
   private readonly interceptor: RefreshInterceptor | undefined;
   private readonly inactivityTracker: InactivityTracker | undefined;
   private readonly events: AuthEventEmitter;
+  private readonly onTokenAcquired: ((tokens: AuthTokens) => void) | undefined;
+  private readonly onTokenRefreshed: ((tokens: AuthTokens) => void) | undefined;
 
   /**
    * @throws Error when `baseUrl`, `realm`, or `clientId` is missing or empty.
    */
-  constructor(config: AuthClientConfig, storage: TokenStorage, collaborators: AuthClientCollaborators = {}) {
+  constructor(
+    config: AuthClientConfig & DirectKcOptions,
+    storage: TokenStorage,
+    collaborators: AuthClientCollaborators = {},
+  ) {
     AuthClient.validateConfig(config);
     this.config = {
       ...config,
       scope: config.scope ?? DEFAULT_SCOPE,
     };
+    this.directKcAuth = config.useDirectKcAuth === true;
     this.tokenStorage = storage;
     this.api = collaborators.api;
     this.interceptor = collaborators.interceptor;
     this.inactivityTracker = collaborators.inactivityTracker;
     this.events = collaborators.events ?? new AuthEventEmitter();
+    this.onTokenAcquired = collaborators.onTokenAcquired;
+    this.onTokenRefreshed = collaborators.onTokenRefreshed;
+  }
+
+  /**
+   * Whether this client is configured to route auth flows directly to
+   * Keycloak (v2.1.0 direct-KC path) instead of through the proxied
+   * identity-api `/auth/*` endpoints.
+   *
+   * Apps can render conditionally on this — e.g. to swap a login form for
+   * a "Sign in with Keycloak" redirect button.
+   */
+  isDirectMode(): boolean {
+    return this.directKcAuth;
+  }
+
+  /**
+   * Persist a token bundle produced by an external flow (e.g. the
+   * app-side `useKeycloakExchange` hook that consumes the shared
+   * `exchangeAuthorizationCode` primitive). Fires `onTokenAcquired` after
+   * persistence and marks the inactivity tracker active.
+   *
+   * Designed for the v2.1.0 direct-KC path where the PKCE code exchange
+   * happens in the app's React-Query hook (which needs `useDispatch`/etc.)
+   * but the token persistence + observability should still flow through
+   * the shared client.
+   */
+  async acceptDirectKcTokens(response: TokenResponse): Promise<AuthTokens> {
+    const tokens = tokenResponseToAuthTokens(response);
+    await this.tokenStorage.write(tokens);
+    if (this.inactivityTracker !== undefined) {
+      await this.inactivityTracker.markActive();
+    }
+    if (this.onTokenAcquired !== undefined) {
+      this.onTokenAcquired(tokens);
+    }
+    return tokens;
+  }
+
+  /**
+   * Same as {@link acceptDirectKcTokens} but fires `onTokenRefreshed`.
+   * Use after a `refreshAccessToken()` swap to keep observability counts
+   * separated between "fresh login" and "silent refresh".
+   */
+  async acceptDirectKcRefresh(response: TokenResponse): Promise<AuthTokens> {
+    const tokens = tokenResponseToAuthTokens(response);
+    await this.tokenStorage.write(tokens);
+    if (this.inactivityTracker !== undefined) {
+      await this.inactivityTracker.markActive();
+    }
+    if (this.onTokenRefreshed !== undefined) {
+      this.onTokenRefreshed(tokens);
+    }
+    return tokens;
   }
 
   /**
@@ -259,7 +351,11 @@ export class AuthClient {
     if (this.interceptor === undefined) {
       throw new Error('AuthClient.refresh: no RefreshInterceptor configured');
     }
-    return this.interceptor.refreshTokens();
+    const tokens = await this.interceptor.refreshTokens();
+    if (tokens !== null && this.onTokenRefreshed !== undefined) {
+      this.onTokenRefreshed(tokens);
+    }
+    return tokens;
   }
 
   async loginWithOtp(input: { email: string; otp: string; tenantId?: string } & LoginOptions): Promise<AuthTokens> {
@@ -315,6 +411,9 @@ export class AuthClient {
     await this.tokenStorage.write(tokens);
     if (this.inactivityTracker !== undefined) {
       await this.inactivityTracker.markActive();
+    }
+    if (this.onTokenAcquired !== undefined) {
+      this.onTokenAcquired(tokens);
     }
     return tokens;
   }

@@ -19,7 +19,10 @@ if (-not (Test-Path $packageJsonPath)) {
 }
 
 # Read package.json
-$packageJson = Get-Content -Path $packageJsonPath -Raw | ConvertFrom-Json
+# Defensive: strip BOM if a prior failed publish corrupted package.json.
+$rawPkg = Get-Content -Path $packageJsonPath -Raw
+if ($rawPkg.Length -gt 0 -and $rawPkg[0] -eq [char]0xFEFF) { $rawPkg = $rawPkg.Substring(1) }
+$packageJson = $rawPkg | ConvertFrom-Json
 $packageName = $packageJson.name
 $currentVersion = $packageJson.version
 
@@ -92,7 +95,10 @@ catch {
   Write-Warning "Build/publish failed. Attempting to rollback version change..."
   $packageJson = Get-Content -Path $packageJsonPath -Raw | ConvertFrom-Json
   $packageJson.version = $currentVersion
-  $packageJson | ConvertTo-Json -Depth 100 | Set-Content -Path $packageJsonPath -Encoding utf8
+  # PS 5.x 'utf8' includes a BOM that breaks downstream JSON parsers (e.g. Metro).
+  # Write UTF-8 without BOM explicitly.
+  $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+  [System.IO.File]::WriteAllText($packageJsonPath, ($packageJson | ConvertTo-Json -Depth 100), $utf8NoBom)
   Write-Warning "Rolled back version in package.json to $currentVersion"
   throw
 }
