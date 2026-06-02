@@ -106,7 +106,11 @@ export {
 export {
   BffAuthClient,
   type BffAuthClientOptions,
+  type BffDevicePinEnrollRequest,
+  type BffDevicePinUnlockRequest,
+  type BffDeviceState,
   type BffForgotPasswordRequest,
+  type BffLoginConfig,
   type BffLoginRequest,
   type BffOtpRequestRequest,
   type BffOtpRequestResult,
@@ -115,6 +119,8 @@ export {
   type BffRegisterRequest,
   type BffResetPasswordRequest,
   type BffUser,
+  type DevicePinEnrollResult,
+  type DevicePinUnlockResult,
 } from './bff/BffAuthClient';
 
 // Pure helpers

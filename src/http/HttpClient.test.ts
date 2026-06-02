@@ -89,6 +89,15 @@ describe('createFetchHttpClient', () => {
     expect(response.status).toBe(401);
   });
 
+  it('exposes a header() accessor that reads response headers (e.g. Retry-After)', async () => {
+    const { fetchImpl } = createMockFetch();
+    const client = createFetchHttpClient(fetchImpl);
+    const response = await client({ url: 'https://x', method: 'GET' });
+    // The mock seeds only content-type; Retry-After is absent → null.
+    expect(response.header?.('Retry-After')).toBeNull();
+    expect(response.header?.('content-type')).toBe('application/json');
+  });
+
   it('treats missing content-type header as non-JSON (data undefined)', async () => {
     const fetchImpl = ((url: string, init?: RequestInit): Promise<Response> => {
       void url;

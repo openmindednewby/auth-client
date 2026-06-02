@@ -151,6 +151,43 @@ await bff.resetPassword({ token, newPassword });
 await bff.logout();
 ```
 
+### Device-bound PIN unlock (v3.3 — unified-login Increment 3)
+
+A returning, remembered-device, logged-OUT user can re-establish a session with a
+4/6/8-digit device PIN. Unlike `login` / `pinLogin` (which throw an opaque error on
+any non-2xx), the device-PIN methods **never throw** — they return discriminated
+results so the UI can route on `status`.
+
+```ts
+// Which methods does this BFF advertise + does this device remember a PIN?
+// NEVER throws — safe fallback (['password'], registration off) on any failure.
+const config = await bff.getLoginConfig();
+if (config.deviceState.hasPin) {
+  /* render the device-PIN unlock screen */
+}
+
+// Bind a PIN to the current strong session.
+const enroll = await bff.enrollDevicePin({ pin: '482913', digits: 6 });
+// status: 'success' | 'unauthorized' | 'forbidden' | 'invalidPin' | 'error'
+
+// Re-establish a session from a remembered device.
+const unlock = await bff.unlockWithDevicePin({ pin: '482913' });
+switch (unlock.status) {
+  case 'success':     /* unlock.user — a session cookie was set */ break;
+  case 'invalid':     /* wrong PIN / unknown-or-revoked device */ break;
+  case 'locked':      /* device lockout — unlock.retryAfterSeconds */ break;
+  case 'rateLimited': /* per-IP limiter — may poll through it */ break;
+  case 'error':       /* network / unexpected */ break;
+}
+
+await bff.disableDevicePin(); // true on success, never throws
+```
+
+The two `429` outcomes are distinct on purpose: the per-IP `BffAuth` limiter
+answers `429` with an **empty** body (`rateLimited` — a UI may poll through it),
+whereas the device-PIN lockout answers `429` with a JSON `{ error }` body + a
+`Retry-After` header (`locked` — show a "try again in N s" message).
+
 The direct-KC `AuthClient` / ROPC surface below is retained for consumers not
 yet on a BFF; it is deprecated and removed once every app has migrated.
 
@@ -191,7 +228,7 @@ auth.on('sessionExpired', () => {
 
 ### Core (`@dloizides/auth-client`)
 
-- `BffAuthClient` — same-origin client for a per-app Backend-For-Frontend. `login()`, `logout()`, `getCurrentUser()`, `register()`, `forgotPassword()`, `resetPassword()`. No token handling — the BFF owns tokens, the browser owns only an httpOnly cookie. **The recommended auth surface (v3).**
+- `BffAuthClient` — same-origin client for a per-app Backend-For-Frontend. `login()`, `logout()`, `getCurrentUser()`, `register()`, `forgotPassword()`, `resetPassword()`, `requestOtp()`, `verifyOtp()`, `pinLogin()`, plus the v3.3 device-PIN surface: `getLoginConfig()`, `enrollDevicePin()`, `unlockWithDevicePin()`, `disableDevicePin()` (discriminated, never-throwing results). No token handling — the BFF owns tokens, the browser owns only an httpOnly cookie. **The recommended auth surface (v3).**
 - `AuthClient` — realm-aware orchestrator. `init()`, `refresh()`, `loginWithOtp()`, `loginWithPassword()`, `logout({ everywhere })`, `requestPasswordReset()`, `confirmPasswordReset()`, plus the v1 surface (`getAccessToken`, `getTokens`, `setTokens`, `clearTokens`, `buildAuthorizationUrl`, etc.). Direct-KC ROPC; deprecated in favour of `BffAuthClient`.
 - `AuthApiClient` — typed wrapper for IdentityService auth endpoints.
 - `AuthEventEmitter` — `sessionExpired` event.

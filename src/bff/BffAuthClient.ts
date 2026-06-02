@@ -1,4 +1,4 @@
-import type { HttpClient } from '../http/HttpClient';
+import type { HttpClient, HttpResponse } from '../http/HttpClient';
 
 /**
  * Same-origin client for a per-app **Backend-For-Frontend** (`bff-katalogos`,
@@ -33,7 +33,25 @@ const ENDPOINTS = {
   otpRequest: '/bff/otp/request',
   otpVerify: '/bff/otp/verify',
   pinLogin: '/bff/pin/login',
+  config: '/bff/config',
+  pinEnroll: '/bff/pin/enroll',
+  pinUnlock: '/bff/pin/unlock',
+  pinDisable: '/bff/pin/disable',
 } as const;
+
+/** HTTP statuses the device-PIN flow routes on. */
+const HTTP_OK = 200;
+const HTTP_MULTIPLE_CHOICES = 300;
+const HTTP_BAD_REQUEST = 400;
+const HTTP_UNAUTHORIZED = 401;
+const HTTP_FORBIDDEN = 403;
+const HTTP_TOO_MANY_REQUESTS = 429;
+
+/** The lowercase login methods `GET /bff/config` advertises (`Bff:Methods:Default`). */
+const FALLBACK_METHODS: readonly string[] = ['password'];
+
+/** The PIN lengths the BFF accepts on enrol (`digits` ∈ {4, 6, 8}). */
+const ALLOWED_PIN_DIGITS: readonly number[] = [4, 6, 8];
 
 /** Credentials posted to `POST /bff/login`. */
 export interface BffLoginRequest {
@@ -98,6 +116,91 @@ export interface BffPinLoginRequest {
   /** External id of the event the PIN is scoped to (supplied by the page/route). */
   eventExternalId: string;
 }
+
+/** Payload for `POST /bff/pin/enroll` — bind a device PIN to the current session. */
+export interface BffDevicePinEnrollRequest {
+  /** The numeric PIN the user chose. */
+  pin: string;
+  /** The chosen PIN length (must be one of 4 / 6 / 8). */
+  digits: number;
+}
+
+/** Payload for `POST /bff/pin/unlock` — re-establish a session from a remembered device. */
+export interface BffDevicePinUnlockRequest {
+  /** The numeric device PIN the returning user entered. */
+  pin: string;
+}
+
+/**
+ * The optional per-device state half of `GET /bff/config`, all fields safe-defaulted.
+ *
+ * Read off the BFF's per-device record (keyed by the device cookie). Older BFFs /
+ * tests omit the fields entirely, in which case the PIN-unlock gate simply never
+ * triggers (`hasPin` defaults to `false`, `rememberedUsername` to `null`).
+ */
+export interface BffDeviceState {
+  /** Non-secret username this device remembers, or `null` when none. */
+  rememberedUsername: string | null;
+  /** `true` when this device has an enrolled device PIN. */
+  hasPin: boolean;
+  /** The enrolled PIN length (4 / 6 / 8), or `null` when unknown / no PIN. */
+  pinDigits: number | null;
+  /** The device-local preferred-method hint (e.g. `"pin"`), or `null`. */
+  preferredMethod: string | null;
+}
+
+/**
+ * The parsed `GET /bff/config` response: which login methods this BFF advertises,
+ * whether self-serve registration is enabled, and the optional per-device state.
+ *
+ * `methods` are the lowercase strings the server-side `BffLoginMethod` enum
+ * serialises to (`"password"` | `"otp"` | `"pin"` | `"passkey"`), de-duplicated
+ * and order-preserving. On a network failure or malformed body the client returns
+ * a safe fallback (`["password"]`, registration off, empty device-state).
+ */
+export interface BffLoginConfig {
+  /** The enabled login methods, lowercase, in the order the BFF advertised them. */
+  methods: string[];
+  /** `true` when this BFF exposes self-serve registration. */
+  registrationEnabled: boolean;
+  /** The optional per-device state (remembered username + device PIN), safe-defaulted. */
+  deviceState: BffDeviceState;
+}
+
+/**
+ * Discriminated result of `unlockWithDevicePin`. Never rejects — the unlock UI
+ * routes on `status` (the published `login`/`pinLogin` throw an opaque error on
+ * any non-2xx, collapsing 401 vs 429; this is why the device-PIN flow needs its
+ * own client surface).
+ *
+ * The two `429` outcomes are distinct and MUST stay distinct: the BFF's per-IP
+ * `BffAuth` sliding-window limiter answers `429` with an EMPTY body
+ * (`rateLimited` — the UI may poll through it), whereas the device-PIN lockout
+ * answers `429` with a JSON `{ error }` body + a `Retry-After` header (`locked` —
+ * the UI shows a "try again in N s" message).
+ */
+export type DevicePinUnlockResult =
+  | { status: 'success'; user: BffUser }
+  | { status: 'invalid' }
+  | { status: 'locked'; retryAfterSeconds: number | null }
+  | { status: 'rateLimited'; retryAfterSeconds: number | null }
+  | { status: 'error' };
+
+/**
+ * Discriminated result of `enrollDevicePin`. Never rejects — the enrol form routes
+ * on `status`:
+ *  - `success`      — HTTP 200, the device PIN is bound to the current session;
+ *  - `unauthorized` — HTTP 401, no session to bind to;
+ *  - `forbidden`    — HTTP 403, a PIN-established session can't enrol a new PIN;
+ *  - `invalidPin`   — HTTP 400, the PIN format was rejected;
+ *  - `error`        — anything else (501 disabled / 502 grant failed / network).
+ */
+export type DevicePinEnrollResult =
+  | { status: 'success' }
+  | { status: 'unauthorized' }
+  | { status: 'forbidden' }
+  | { status: 'invalidPin' }
+  | { status: 'error' };
 
 /**
  * The body `POST /bff/otp/request` relays from TenantService.
@@ -178,6 +281,104 @@ function toOtpRequestResult(data: unknown): BffOtpRequestResult {
     expiresIn: typeof data.expiresIn === 'number' ? data.expiresIn : 0,
     code: typeof data.code === 'string' ? data.code : null,
   };
+}
+
+/** The safe fallback returned by `getLoginConfig` on any failure. */
+const FALLBACK_LOGIN_CONFIG: BffLoginConfig = {
+  methods: [...FALLBACK_METHODS],
+  registrationEnabled: false,
+  deviceState: {
+    rememberedUsername: null,
+    hasPin: false,
+    pinDigits: null,
+    preferredMethod: null,
+  },
+};
+
+/** Read an optional non-empty string field off a record, else `null`. */
+function readOptionalString(record: Record<string, unknown>, key: string): string | null {
+  const value = record[key];
+  if (typeof value !== 'string' || value === '') {
+    return null;
+  }
+  return value;
+}
+
+/** Parse the optional device-state fields off `/bff/config` (graceful defaults). */
+function parseDeviceState(body: Record<string, unknown>): BffDeviceState {
+  const rawDigits = body.pinDigits;
+  const hasValidDigits = typeof rawDigits === 'number' && ALLOWED_PIN_DIGITS.includes(rawDigits);
+  return {
+    rememberedUsername: readOptionalString(body, 'rememberedUsername'),
+    hasPin: body.hasPin === true,
+    pinDigits: hasValidDigits ? rawDigits : null,
+    preferredMethod: readOptionalString(body, 'preferredMethod'),
+  };
+}
+
+/** Normalise the `methods` array to lowercase strings, de-duplicated, fallback when empty. */
+function parseMethods(body: Record<string, unknown>): string[] {
+  const raw = body.methods;
+  if (!Array.isArray(raw)) {
+    return [...FALLBACK_METHODS];
+  }
+  const parsed = raw
+    .filter((value): value is string => typeof value === 'string' && value !== '')
+    .map((value) => value.toLowerCase());
+  return parsed.length === 0 ? [...FALLBACK_METHODS] : Array.from(new Set(parsed));
+}
+
+/** Parse a full `GET /bff/config` body into a `BffLoginConfig`, falling back defensively. */
+function parseLoginConfig(data: unknown): BffLoginConfig {
+  if (!isRecord(data)) {
+    return FALLBACK_LOGIN_CONFIG;
+  }
+  return {
+    methods: parseMethods(data),
+    registrationEnabled: data.registrationEnabled === true,
+    deviceState: parseDeviceState(data),
+  };
+}
+
+/**
+ * Parse a `Retry-After` header value (delta-seconds form) into a non-negative
+ * integer, or `null` when absent / unparseable.
+ */
+function parseRetryAfter(response: HttpResponse): number | null {
+  const raw = response.header?.('Retry-After');
+  if (raw === null || raw === undefined) {
+    return null;
+  }
+  const seconds = Number.parseInt(raw, 10);
+  if (Number.isNaN(seconds) || seconds < 0) {
+    return null;
+  }
+  return seconds;
+}
+
+/** Map a `429` unlock response to `locked` (JSON body) or `rateLimited` (empty body). */
+function classifyTooManyRequests(response: HttpResponse): DevicePinUnlockResult {
+  const retryAfterSeconds = parseRetryAfter(response);
+  // The per-IP limiter answers 429 with an EMPTY body (data undefined); the
+  // device-PIN lockout answers 429 with a JSON `{ error }` body (data is a record).
+  if (isRecord(response.data)) {
+    return { status: 'locked', retryAfterSeconds };
+  }
+  return { status: 'rateLimited', retryAfterSeconds };
+}
+
+/** Map a non-success enrol status to its discriminated result. */
+function classifyEnrollFailure(status: number): DevicePinEnrollResult {
+  if (status === HTTP_UNAUTHORIZED) {
+    return { status: 'unauthorized' };
+  }
+  if (status === HTTP_FORBIDDEN) {
+    return { status: 'forbidden' };
+  }
+  if (status === HTTP_BAD_REQUEST) {
+    return { status: 'invalidPin' };
+  }
+  return { status: 'error' };
 }
 
 /**
@@ -314,22 +515,131 @@ export class BffAuthClient {
   }
 
   /**
-   * Shared POST for every state-changing `/bff/*` call: same-origin, cookie
-   * included, `X-BFF-Csrf` header attached. Throws a labelled error on non-2xx.
+   * `GET /bff/config` — which login methods this BFF advertises, whether
+   * registration is enabled, and the optional per-device state (remembered
+   * username + device PIN). Unauthenticated, no CSRF (GET).
+   *
+   * NEVER throws: on a non-2xx, a network error, or a malformed body it returns
+   * a safe fallback (`{ methods: ['password'], registrationEnabled: false,
+   * deviceState: { rememberedUsername: null, hasPin: false, pinDigits: null,
+   * preferredMethod: null } }`) so the login surface stays usable even when the
+   * config endpoint is unreachable.
    */
-  private async postState(path: string, body: object | undefined, label: string): Promise<unknown> {
+  async getLoginConfig(): Promise<BffLoginConfig> {
+    try {
+      const response = await this.http({
+        url: `${this.baseUrl}${ENDPOINTS.config}`,
+        method: 'GET',
+        headers: { Accept: JSON_CONTENT_TYPE },
+        credentials: 'include',
+      });
+      if (!response.ok) {
+        return FALLBACK_LOGIN_CONFIG;
+      }
+      return parseLoginConfig(response.data);
+    } catch {
+      return FALLBACK_LOGIN_CONFIG;
+    }
+  }
+
+  /**
+   * `POST /bff/pin/enroll` — bind a device PIN to the CURRENT strong session.
+   * Requires an authenticated session (the cookie travels via
+   * `credentials: 'include'`); the BFF requests an offline token, hashes the
+   * PIN, and sets the device cookie.
+   *
+   * NEVER throws — resolves a discriminated {@link DevicePinEnrollResult}:
+   *  - 200 → `success`;
+   *  - 401 → `unauthorized` (no session);
+   *  - 403 → `forbidden` (a PIN-established session can't enrol);
+   *  - 400 → `invalidPin` (bad format);
+   *  - anything else (501 disabled / 502 grant failed) / network → `error`.
+   */
+  async enrollDevicePin(request: BffDevicePinEnrollRequest): Promise<DevicePinEnrollResult> {
+    try {
+      const response = await this.postRaw(ENDPOINTS.pinEnroll, request);
+      if (response.ok) {
+        return { status: 'success' };
+      }
+      return classifyEnrollFailure(response.status);
+    } catch {
+      return { status: 'error' };
+    }
+  }
+
+  /**
+   * `POST /bff/pin/unlock` — re-establish a session from a remembered device.
+   * No prior session; the device cookie travels via `credentials: 'include'`.
+   *
+   * NEVER throws — resolves a discriminated {@link DevicePinUnlockResult}:
+   *  - 200 + `{ user }` → `success` (a session cookie was set);
+   *  - 401             → `invalid` (wrong PIN / unknown-or-revoked device);
+   *  - 429 + JSON body → `locked` (device lockout; `Retry-After` parsed);
+   *  - 429 + empty body → `rateLimited` (per-IP limiter; `Retry-After` parsed);
+   *  - anything else / malformed 200 body / network → `error`.
+   */
+  async unlockWithDevicePin(request: BffDevicePinUnlockRequest): Promise<DevicePinUnlockResult> {
+    try {
+      const response = await this.postRaw(ENDPOINTS.pinUnlock, request);
+      const isSuccess = response.status >= HTTP_OK && response.status < HTTP_MULTIPLE_CHOICES;
+      if (isSuccess) {
+        const user = extractUser(response.data);
+        return user === null ? { status: 'error' } : { status: 'success', user };
+      }
+      if (response.status === HTTP_UNAUTHORIZED) {
+        return { status: 'invalid' };
+      }
+      if (response.status === HTTP_TOO_MANY_REQUESTS) {
+        return classifyTooManyRequests(response);
+      }
+      return { status: 'error' };
+    } catch {
+      return { status: 'error' };
+    }
+  }
+
+  /**
+   * `POST /bff/pin/disable` — drop the device PIN for the CURRENT session. The
+   * BFF revokes the offline token at Keycloak, deletes the device record, and
+   * clears the device cookie. Requires an authenticated session.
+   *
+   * NEVER throws — resolves `true` on a 2xx, `false` on anything else.
+   */
+  async disableDevicePin(): Promise<boolean> {
+    try {
+      const response = await this.postRaw(ENDPOINTS.pinDisable, undefined);
+      return response.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Shared POST for the never-throw device-PIN calls: same-origin, cookie
+   * included, `X-BFF-Csrf` header attached. Returns the raw {@link HttpResponse}
+   * (status + body + headers) so the caller can route on it instead of throwing.
+   */
+  private postRaw(path: string, body: object | undefined): Promise<HttpResponse> {
     const headers: Record<string, string> = {
       'Content-Type': JSON_CONTENT_TYPE,
       Accept: JSON_CONTENT_TYPE,
       [CSRF_HEADER]: CSRF_HEADER_VALUE,
     };
-    const response = await this.http({
+    return this.http({
       url: `${this.baseUrl}${path}`,
       method: 'POST',
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
       credentials: 'include',
     });
+  }
+
+  /**
+   * Shared POST for every state-changing `/bff/*` call: same-origin, cookie
+   * included, `X-BFF-Csrf` header attached. Throws a labelled error on non-2xx.
+   */
+  private async postState(path: string, body: object | undefined, label: string): Promise<unknown> {
+    const response = await this.postRaw(path, body);
     if (!response.ok) {
       throw new Error(`${label} failed with status ${String(response.status)}`);
     }

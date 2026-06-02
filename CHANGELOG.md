@@ -1,5 +1,43 @@
 # Changelog
 
+## 3.3.0 (2026-06-02)
+
+Additive release for unified-login Increment 3 — device-bound PIN unlock +
+`/bff/config`. Extracts kefi-web's proven device-PIN client (the "second use"),
+giving `@dloizides/auth-web` 1.4.0 a shared same-origin client with
+**discriminated** results. The published `login` / `pinLogin` throw an opaque
+error on any non-2xx, collapsing 401 (wrong PIN) and 429 (locked / rate-limited);
+the new device-PIN methods never throw and route on a discriminated `status`
+instead. No breaking changes.
+
+### Added
+
+- `BffAuthClient.getLoginConfig()` → `GET /bff/config`. Returns the advertised
+  login methods (lowercase, de-duplicated), `registrationEnabled`, and the
+  optional per-device state (`rememberedUsername`, `hasPin`, `pinDigits`,
+  `preferredMethod`). NEVER throws — on a non-2xx, a network error, or a
+  malformed body it returns a safe fallback (`['password']`, registration off,
+  empty device-state). Unauthenticated, no CSRF (GET).
+- `BffAuthClient.enrollDevicePin({ pin, digits })` → `POST /bff/pin/enroll`.
+  Discriminated `DevicePinEnrollResult`: `success` (200), `unauthorized` (401),
+  `forbidden` (403, PIN-established session), `invalidPin` (400), `error`
+  (anything else / network). Never throws.
+- `BffAuthClient.unlockWithDevicePin({ pin })` → `POST /bff/pin/unlock`.
+  Discriminated `DevicePinUnlockResult`: `success` + `user` (200), `invalid`
+  (401), `locked` (429 **with** a JSON body — device lockout), `rateLimited`
+  (429 with an **empty** body — per-IP limiter), `error` (anything else /
+  malformed 200 / network). Both 429 variants carry the parsed `Retry-After`
+  seconds (`null` when absent / unparseable). Never throws. Distinguishing
+  `locked` vs `rateLimited` lets UIs poll through rate limits but show lockout
+  copy.
+- `BffAuthClient.disableDevicePin()` → `POST /bff/pin/disable`. `true` on a 2xx,
+  `false` otherwise. Never throws.
+- Types: `BffLoginConfig`, `BffDeviceState`, `BffDevicePinEnrollRequest`,
+  `BffDevicePinUnlockRequest`, `DevicePinUnlockResult`, `DevicePinEnrollResult`.
+- `HttpResponse.header?(name)` — an optional, case-insensitive response-header
+  accessor (the bundled `createFetchHttpClient` always provides it). Needed to
+  read `Retry-After` off the unlock `429`. Backward-compatible (optional).
+
 ## 3.2.0 (2026-05-22)
 
 Additive release for Phase 3d of the unified-auth plan — event-scoped PIN

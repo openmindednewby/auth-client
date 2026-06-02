@@ -21,6 +21,13 @@ export interface HttpResponse {
   ok: boolean;
   /** Parsed body (already JSON-decoded). `undefined` for 204 / empty bodies. */
   data?: unknown;
+  /**
+   * Read a single response header by (case-insensitive) name, or `null` when
+   * absent. Optional so existing transports stay source-compatible; the bundled
+   * `createFetchHttpClient` always provides it. The device-PIN unlock flow needs
+   * it to read `Retry-After` off a `429`.
+   */
+  header?: (name: string) => string | null;
 }
 
 export type HttpClient = (request: HttpRequest) => Promise<HttpResponse>;
@@ -54,6 +61,7 @@ export function createFetchHttpClient(fetchImpl: typeof fetch): HttpClient {
       status: response.status,
       ok: response.ok,
       data,
+      header: (name: string): string | null => response.headers.get(name),
     };
   };
 }
