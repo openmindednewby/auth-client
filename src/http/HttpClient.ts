@@ -8,7 +8,7 @@
  */
 export interface HttpRequest {
   url: string;
-  method: 'GET' | 'POST' | 'DELETE';
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   headers?: Record<string, string>;
   /** When set, body is sent as the request body; serialization is the caller's job. */
   body?: string;

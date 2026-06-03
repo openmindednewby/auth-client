@@ -1,6 +1,6 @@
 {
     "name": "@dloizides/auth-client",
-    "version": "3.3.0",
+    "version": "3.4.0",
     "description": "Auth client for the dloizides.com portfolio. v3 adds BffAuthClient â€” the same-origin client for a per-app Backend-For-Frontend. Also: realm-aware Keycloak/OIDC (PKCE/ROPC), token refresh, storage adapters, hooks for sessions and password reset.",
     "keywords": [
         "keycloak",
