@@ -24,3 +24,7 @@ Thumbs.db
 # Logs
 *.log
 npm-debug.log*
+
+# Leftover from an interrupted npm install. Never track it: a dirty tree now BLOCKS
+# publishing (publish-guard), so stray build artifacts must not appear as changes.
+.node_modules_old/
