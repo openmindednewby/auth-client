@@ -1,5 +1,20 @@
 # Changelog
 
+## 4.0.0 (2026-07-10)
+
+**No API change — an accidental major.** `4.0.0` was published to npm from a stray
+`-Bump major` run; its published type declarations are BYTE-IDENTICAL to `3.4.1`
+(verified by diffing the packed `dist/index.d.ts` of both versions: 0 lines of
+difference). There are no breaking changes and **no migration is required** —
+consumers may move from `^3.4.x` to `^4.0.0` with zero code changes.
+
+Recorded here so the version is not mistaken for a real breaking release, and to
+reconcile the repo (which sat at 3.4.1) with the registry (which serves 4.0.0).
+
+### Changed
+
+- Version only. No source, behaviour, or type changes vs 3.4.1.
+
 ## 3.3.0 (2026-06-02)
 
 Additive release for unified-login Increment 3 — device-bound PIN unlock +
