@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
   [Parameter(Mandatory = $true)]
   [ValidateSet("patch", "minor", "major")]
@@ -137,12 +137,16 @@ catch {
   }
   # Rollback version on failure
   Write-Warning "Build/publish failed. Attempting to rollback version change..."
-  $packageJson = Get-Content -Path $packageJsonPath -Raw | ConvertFrom-Json
-  $packageJson.version = $currentVersion
-  # PS 5.x 'utf8' includes a BOM that breaks downstream JSON parsers (e.g. Metro).
-  # Write UTF-8 without BOM explicitly.
+    # Rewrite ONLY the version string in the raw text. Do NOT round-trip the file
+  # through ConvertFrom-Json | ConvertTo-Json: PowerShell re-serialises the WHOLE
+  # document, unicode-escaping '>' as \u003e and '&' as \u0026 and reindenting it.
+  # The output stays VALID JSON -- so nothing complains -- but it is no longer the
+  # file npm wrote. That silently corrupted 10 package.json files (2 got committed).
+  $raw = [System.IO.File]::ReadAllText($packageJsonPath)
+  $pattern = '("version"\s*:\s*")[^"]*(")'
+  $rolledBack = [regex]::Replace($raw, $pattern, "`${1}$currentVersion`${2}", 1)
   $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
-  [System.IO.File]::WriteAllText($packageJsonPath, ($packageJson | ConvertTo-Json -Depth 100), $utf8NoBom)
+  [System.IO.File]::WriteAllText($packageJsonPath, $rolledBack, $utf8NoBom)
   Write-Warning "Rolled back version in package.json to $currentVersion"
   throw
 }
