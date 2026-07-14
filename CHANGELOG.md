@@ -1,5 +1,40 @@
 # Changelog
 
+## 4.1.0 (2026-07-14)
+
+### 🔴 Security — `logout()` left the user signed in at the IdP (SEC-2)
+
+`BffAuthClient.logout()` cleared the BFF's session cookie and stopped there. But the identity
+provider keeps its **own** httpOnly session cookie in the **browser**, on its own origin — and
+the BFF cannot touch it (its end-session call is a back-channel POST, which carries no browser
+cookie and therefore cannot clear one). So the user *looked* signed out while the IdP still
+considered them signed in, and the next trip through the authorize endpoint **silently
+re-authenticated them**.
+
+Verified live on `aml-v2`: after sign-out, `/bff/me` returned **401** — yet a fresh authorize
+landed straight back on the app with `/bff/me` → **200, `roles: admin`**, with **no credentials
+re-entered**. The same was reproduced against Keycloak using a cookie jar holding *only* IdP
+cookies and no app cookie.
+
+**Fix.** `logout()` now reads `idpLogoutUrl` from the `POST /bff/logout` response and, when
+present, performs a **top-level navigation** (`window.location.assign`) to the IdP's logout
+endpoint — the only thing that can end an IdP browser session, because only a navigation sends
+the browser's IdP cookie along. A `fetch` here would repeat the original mistake exactly.
+
+Requires `Bff.AspNetCore` >= 1.9.0 to emit `idpLogoutUrl`.
+
+### Changed (non-breaking)
+
+- `logout()` returns `Promise<string | null>` (was `Promise<void>`) — the IdP logout URL, or
+  `null` when none applies. Existing `await client.logout()` callers need no change, and
+  `@dloizides/auth-web`'s `useBffAuth` picks the behaviour up transitively.
+- `logout({ redirect: false })` skips the navigation and returns the URL instead, for tests and
+  for callers that must run teardown first. **If you pass it, you own navigating** — dropping
+  the URL reintroduces the bug.
+- No navigation occurs for ROPC / OTP / device-PIN sessions (the BFF returns `null` — those
+  never sent the browser to the IdP), nor against an older BFF that omits the field. Both
+  degrade to exactly the previous behaviour.
+
 ## 4.0.0 (2026-07-10)
 
 **No API change — an accidental major.** `4.0.0` was published to npm from a stray

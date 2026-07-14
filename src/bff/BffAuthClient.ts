@@ -265,6 +265,21 @@ function extractUser(data: unknown): BffUser | null {
 }
 
 /**
+ * Pull `idpLogoutUrl` out of the `POST /bff/logout` response, or `null`.
+ *
+ * Read defensively: a BFF running an engine older than Bff.AspNetCore 1.9.0 simply omits the
+ * field. Absent/blank/non-string degrades to `null` — i.e. "no IdP navigation needed", which is
+ * the pre-existing behaviour. So a new client against an old BFF is never worse than before.
+ */
+function extractIdpLogoutUrl(data: unknown): string | null {
+  if (!isRecord(data)) {
+    return null;
+  }
+  const url = data['idpLogoutUrl'];
+  return typeof url === 'string' && url.length > 0 ? url : null;
+}
+
+/**
  * Normalise the `POST /bff/otp/request` response body into a `BffOtpRequestResult`.
  *
  * The endpoint is anti-enumeration — the body shape is fixed — but it is read
@@ -411,12 +426,47 @@ export class BffAuthClient {
   }
 
   /**
-   * `POST /bff/logout` — the BFF calls KC end-session, deletes the Redis
-   * session, and clears the cookie. Non-fatal: a failed logout still leaves
-   * the SPA logged out client-side. Throws only on a non-2xx response.
+   * `POST /bff/logout` — deletes the BFF's Redis session and clears its cookie, then, when the
+   * IdP still holds a session in THIS BROWSER, navigates to the IdP to end that too.
+   *
+   * ## Why the navigation is not optional
+   *
+   * The BFF cannot sign you out of the identity provider. The IdP's session is an httpOnly
+   * cookie in the **browser**, on the IdP's own origin. The BFF's end-session call is a
+   * back-channel POST from the server: it carries no such cookie, so it cannot clear one — by
+   * construction. Clearing the BFF cookie alone therefore produces a user who *looks* signed
+   * out while the IdP still considers them signed in; the very next trip through the authorize
+   * endpoint is **silently re-authenticated**, minting a fresh session with all their roles.
+   * That is a real defect this method exists to close (sign-out that signed the user back in).
+   *
+   * The only thing that ends an IdP browser session is a **top-level navigation** to its logout
+   * endpoint (RP-initiated logout), so the request rides the browser's own IdP cookie. Hence
+   * `location.assign` — a `fetch` here would repeat the original mistake exactly.
+   *
+   * The BFF returns `idpLogoutUrl` only for sessions established via the front-channel
+   * auth-code flow (the ones that actually have an IdP cookie). A ROPC / OTP / device-PIN login
+   * never sent the browser to the IdP, so `idpLogoutUrl` is `null` and no navigation happens —
+   * those flows behave exactly as before.
+   *
+   * @param options.redirect - When `false`, skip the navigation and return the URL instead.
+   *   For tests and for callers that must run teardown first. **If you pass `false`, you own
+   *   navigating to the returned URL** — dropping it on the floor reintroduces the bug.
+   * @returns The IdP logout URL when one applies (and `redirect` is `false`), else `null`.
    */
-  async logout(): Promise<void> {
-    await this.postState(ENDPOINTS.logout, undefined, 'logout');
+  async logout(options: { redirect?: boolean } = {}): Promise<string | null> {
+    const data = await this.postState(ENDPOINTS.logout, undefined, 'logout');
+    const idpLogoutUrl = extractIdpLogoutUrl(data);
+
+    if (idpLogoutUrl === null) {
+      return null;
+    }
+
+    const shouldRedirect = options.redirect ?? true;
+    if (shouldRedirect && typeof window !== 'undefined') {
+      window.location.assign(idpLogoutUrl);
+    }
+
+    return idpLogoutUrl;
   }
 
   /**
