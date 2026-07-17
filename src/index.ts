@@ -119,6 +119,7 @@ export {
   type BffRegisterRequest,
   type BffResetPasswordRequest,
   type BffUser,
+  type DemoCredentials,
   type DevicePinEnrollResult,
   type DevicePinUnlockResult,
 } from './bff/BffAuthClient';

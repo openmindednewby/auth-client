@@ -1,5 +1,30 @@
 # Changelog
 
+## 4.2.0 (2026-07-17)
+
+Additive release surfacing **published demo credentials** on `BffLoginConfig`, so
+the one hook that already fetches `GET /bff/config` also carries the demo pair —
+no app hand-rolls a second fetch for it. Purely additive: every 4.1.x export is
+unchanged, and a BFF that serves no `demo` block yields `config.demo === null`.
+
+### Added
+
+- **`BffLoginConfig.demo: DemoCredentials | null`** — the published demo account
+  a deployment advertises (for the auth-web `<DemoCredentialsHint>` one-tap
+  sign-in), or `null` when none is configured.
+- **`DemoCredentials`** (`{ username, password }`) — exported type. The wire
+  spells the fields `demo.publishedUsername` / `demo.publishedPassword`;
+  `getLoginConfig` maps them onto `username` / `password` so the auth-web demo
+  hooks consume the shape directly.
+
+### Parsing — fail closed on the client too
+
+`getLoginConfig` surfaces `demo` ONLY when the block is an object AND both
+`publishedUsername` and `publishedPassword` are present non-empty strings. A
+missing block, a partial block (username only), a blank field, or a non-object
+`demo` all resolve to `null` — never a half-filled object. The safe fallback
+(non-record body / non-2xx / network error) carries `demo: null`.
+
 ## 4.1.0 (2026-07-14)
 
 ### 🔴 Security — `logout()` left the user signed in at the IdP (SEC-2)

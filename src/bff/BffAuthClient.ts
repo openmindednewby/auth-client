@@ -150,13 +150,34 @@ export interface BffDeviceState {
 }
 
 /**
+ * A published demo-account credential pair, as advertised by `GET /bff/config`.
+ *
+ * The BFF is the only thing that knows whether a deployment has a demo configured
+ * server-side — a client-bundled const would ship the credentials into every
+ * customer's self-hosted build. Surfacing it here lets the one hook that already
+ * fetches `/bff/config` also carry the demo, so no app hand-rolls a second fetch.
+ *
+ * The wire spells the fields `publishedUsername` / `publishedPassword`; this
+ * client maps them onto `username` / `password` so the auth-web demo hooks
+ * consume the shape directly. Present only when BOTH are non-empty; otherwise the
+ * whole `demo` field is `null` (fail closed).
+ */
+export interface DemoCredentials {
+  /** The demo account's username. */
+  username: string;
+  /** The demo account's password. */
+  password: string;
+}
+
+/**
  * The parsed `GET /bff/config` response: which login methods this BFF advertises,
- * whether self-serve registration is enabled, and the optional per-device state.
+ * whether self-serve registration is enabled, the optional per-device state, and
+ * an optional published demo credential.
  *
  * `methods` are the lowercase strings the server-side `BffLoginMethod` enum
  * serialises to (`"password"` | `"otp"` | `"pin"` | `"passkey"`), de-duplicated
  * and order-preserving. On a network failure or malformed body the client returns
- * a safe fallback (`["password"]`, registration off, empty device-state).
+ * a safe fallback (`["password"]`, registration off, empty device-state, no demo).
  */
 export interface BffLoginConfig {
   /** The enabled login methods, lowercase, in the order the BFF advertised them. */
@@ -165,6 +186,12 @@ export interface BffLoginConfig {
   registrationEnabled: boolean;
   /** The optional per-device state (remembered username + device PIN), safe-defaulted. */
   deviceState: BffDeviceState;
+  /**
+   * The published demo credentials this deployment advertises, or `null` when
+   * none is configured (or only half of the pair is present). Fail closed: a
+   * missing / partial demo block is `null`, never a half-filled object.
+   */
+  demo: DemoCredentials | null;
 }
 
 /**
@@ -308,6 +335,7 @@ const FALLBACK_LOGIN_CONFIG: BffLoginConfig = {
     pinDigits: null,
     preferredMethod: null,
   },
+  demo: null,
 };
 
 /** Read an optional non-empty string field off a record, else `null`. */
@@ -343,6 +371,29 @@ function parseMethods(body: Record<string, unknown>): string[] {
   return parsed.length === 0 ? [...FALLBACK_METHODS] : Array.from(new Set(parsed));
 }
 
+/**
+ * Parse the optional `demo` block off `/bff/config` — FAIL CLOSED.
+ *
+ * The wire shape is `demo: { publishedUsername, publishedPassword } | null`. This
+ * surfaces a credential ONLY when the block is an object AND both fields are
+ * present non-empty strings; a missing block, a partial block (username only),
+ * or a blank field all resolve to `null`. Never a half-filled object — a login
+ * page must not advertise a demo it cannot actually sign in with. The same
+ * discipline the client applies to `readOptionalString`, made all-or-nothing.
+ */
+function parseDemo(body: Record<string, unknown>): DemoCredentials | null {
+  const raw = body.demo;
+  if (!isRecord(raw)) {
+    return null;
+  }
+  const username = readOptionalString(raw, 'publishedUsername');
+  const password = readOptionalString(raw, 'publishedPassword');
+  if (username === null || password === null) {
+    return null;
+  }
+  return { username, password };
+}
+
 /** Parse a full `GET /bff/config` body into a `BffLoginConfig`, falling back defensively. */
 function parseLoginConfig(data: unknown): BffLoginConfig {
   if (!isRecord(data)) {
@@ -352,6 +403,7 @@ function parseLoginConfig(data: unknown): BffLoginConfig {
     methods: parseMethods(data),
     registrationEnabled: data.registrationEnabled === true,
     deviceState: parseDeviceState(data),
+    demo: parseDemo(data),
   };
 }
 

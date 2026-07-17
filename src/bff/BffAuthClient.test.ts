@@ -451,6 +451,7 @@ describe('BffAuthClient.getLoginConfig', () => {
         pinDigits: 6,
         preferredMethod: 'pin',
       },
+      demo: null,
     });
   });
 
@@ -521,6 +522,7 @@ describe('BffAuthClient.getLoginConfig', () => {
         pinDigits: null,
         preferredMethod: null,
       },
+      demo: null,
     });
   });
 
@@ -532,6 +534,7 @@ describe('BffAuthClient.getLoginConfig', () => {
 
     expect(config.methods).toEqual(['password']);
     expect(config.deviceState.hasPin).toBe(false);
+    expect(config.demo).toBeNull();
   });
 
   it('returns the safe fallback when the transport throws (network error)', async () => {
@@ -541,6 +544,79 @@ describe('BffAuthClient.getLoginConfig', () => {
     const config = await client.getLoginConfig();
 
     expect(config.methods).toEqual(['password']);
+    expect(config.demo).toBeNull();
+  });
+
+  // ── demo credentials (published, one-tap sign-in) ─────────────────────────────
+  it('parses a valid demo block, mapping publishedUsername/Password → username/password', async () => {
+    const mock = createMockHttp({
+      status: 200,
+      ok: true,
+      data: {
+        methods: ['password'],
+        demo: { publishedUsername: 'demo', publishedPassword: 'ZygosDemo!2026.Try' },
+      },
+    });
+    const client = new BffAuthClient({ http: mock.http });
+
+    const config = await client.getLoginConfig();
+
+    expect(config.demo).toEqual({ username: 'demo', password: 'ZygosDemo!2026.Try' });
+  });
+
+  it('fails closed to null when only publishedUsername is present (half-configured demo)', async () => {
+    const mock = createMockHttp({
+      status: 200,
+      ok: true,
+      data: { methods: ['password'], demo: { publishedUsername: 'demo' } },
+    });
+    const client = new BffAuthClient({ http: mock.http });
+
+    const config = await client.getLoginConfig();
+
+    expect(config.demo).toBeNull();
+  });
+
+  it('fails closed to null when publishedPassword is an empty string', async () => {
+    const mock = createMockHttp({
+      status: 200,
+      ok: true,
+      data: {
+        methods: ['password'],
+        demo: { publishedUsername: 'demo', publishedPassword: '' },
+      },
+    });
+    const client = new BffAuthClient({ http: mock.http });
+
+    const config = await client.getLoginConfig();
+
+    expect(config.demo).toBeNull();
+  });
+
+  it('is null (no throw) when there is no demo field on the response', async () => {
+    const mock = createMockHttp({
+      status: 200,
+      ok: true,
+      data: { methods: ['password'], registrationEnabled: true },
+    });
+    const client = new BffAuthClient({ http: mock.http });
+
+    const config = await client.getLoginConfig();
+
+    expect(config.demo).toBeNull();
+  });
+
+  it('is null when demo is present but not an object', async () => {
+    const mock = createMockHttp({
+      status: 200,
+      ok: true,
+      data: { methods: ['password'], demo: 'demo:pw' },
+    });
+    const client = new BffAuthClient({ http: mock.http });
+
+    const config = await client.getLoginConfig();
+
+    expect(config.demo).toBeNull();
   });
 });
 
