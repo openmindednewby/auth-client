@@ -15,6 +15,95 @@ $ErrorActionPreference = "Stop"
 # Use npm.cmd on Windows to avoid PowerShell wrapper issues with strict mode
 $npmCmd = if ($env:OS -match "Windows") { "npm.cmd" } else { "npm" }
 
+# --- npm authentication (falls back to NPM_TOKEN in the repo-root .env.local) ---
+# These per-package scripts used to rely PURELY on ambient ~/.npmrc auth. When that auth
+# lapsed every publish died with an E404-from-401 while a perfectly good token sat in
+# SaaS/.env.local the whole time - @dloizides/design-tokens@1.3.0 was gated, bumped and
+# committed but never published by exactly this. Mirrors NpmPackages/publish-all.ps1.
+# Precedence: $env:NPM_TOKEN > NPM_TOKEN in <repo-root>/.env.local > ambient ~/.npmrc.
+$tokenToUse = $null
+$tokenSource = $null
+if ($env:NPM_TOKEN) {
+  $tokenToUse = $env:NPM_TOKEN
+  $tokenSource = "NPM_TOKEN environment variable"
+} else {
+  # <repo-root> is three levels up: packages/<name> -> packages -> NpmPackages -> SaaS
+  $envLocalPath = Join-Path (Split-Path (Split-Path (Split-Path $PSScriptRoot))) ".env.local"
+  if (Test-Path $envLocalPath) {
+    $tokenMatch = Select-String -Path $envLocalPath -Pattern "^NPM_TOKEN=(.+)$" | Select-Object -First 1
+    if ($tokenMatch) {
+      $tokenToUse = $tokenMatch.Matches[0].Groups[1].Value.Trim()
+      $tokenSource = "NPM_TOKEN in $envLocalPath"
+      Write-Host "Loaded NPM_TOKEN from .env.local" -ForegroundColor Green
+    }
+  }
+}
+
+# Shape validation MUST run before the value reaches any npm config. A value that is not a
+# plausible npm token is almost certainly a mis-bound argument (a package name, a bump type,
+# a path); writing it into an auth slot corrupts npm auth and surfaces MUCH later as an
+# unrelated 'E404 on PUT' or 'E401 whoami'. Never echo the value - only length and shape.
+function Test-NpmTokenShape {
+  param([string]$Token)
+  # Modern granular/classic npm tokens: 'npm_' + 36 base62 chars.
+  if ($Token -match '^npm_[A-Za-z0-9]{36,}$') { return $true }
+  # Legacy npm tokens were bare UUIDv4.
+  if ($Token -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') { return $true }
+  return $false
+}
+
+if ($tokenToUse -and -not (Test-NpmTokenShape -Token $tokenToUse)) {
+  Write-Host "ERROR: The npm token is not a valid npm token." -ForegroundColor Red
+  Write-Host "  Source   : $tokenSource" -ForegroundColor Yellow
+  Write-Host "  Length   : $($tokenToUse.Length) characters" -ForegroundColor Yellow
+  Write-Host "  Expected : 'npm_' followed by 36+ characters (or a legacy UUID)" -ForegroundColor Yellow
+  Write-Host "NOTHING was written to any npm config. Your ~/.npmrc is untouched." -ForegroundColor Green
+  exit 1
+}
+
+$tempUserConfig = $null
+$previousUserConfigEnv = $env:NPM_CONFIG_USERCONFIG
+
+# The try opens BEFORE the temp file is created, so there is no window in which a
+# credential-bearing file can exist without the finally being armed to remove it.
+try {
+
+if ($tokenToUse) {
+  # Redirect npm's USER-CONFIG FILE to a per-run temp copy via NPM_CONFIG_USERCONFIG.
+  # We do NOT run 'npm config set --location user': that rewrites the developer's
+  # machine-wide ~/.npmrc, and its matching delete only runs on the happy path, so any
+  # failure in between leaves a corrupted credential behind permanently. Seed the temp
+  # file from the real ~/.npmrc so unrelated settings (legacy-peer-deps etc.) still apply,
+  # then override only the auth line.
+  $realUserConfig = if ($env:USERPROFILE) { Join-Path $env:USERPROFILE ".npmrc" } else { Join-Path $HOME ".npmrc" }
+  $tempUserConfig = Join-Path ([System.IO.Path]::GetTempPath()) ("npmrc-publish-" + [Guid]::NewGuid().ToString("N") + ".tmp")
+
+  $carriedLines = @()
+  if (Test-Path $realUserConfig) {
+    $carriedLines = Get-Content -Path $realUserConfig | Where-Object { $_ -notmatch '_authToken' }
+  }
+  Set-Content -Path $tempUserConfig -Value ($carriedLines + "//registry.npmjs.org/:_authToken=$tokenToUse") -Encoding ASCII
+
+  # Restrict the temp file to the current user - it holds a live credential.
+  try {
+    $acl = Get-Acl $tempUserConfig
+    $acl.SetAccessRuleProtection($true, $false)
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+      [System.Security.Principal.WindowsIdentity]::GetCurrent().Name, "FullControl", "Allow")
+    $acl.SetAccessRule($rule)
+    Set-Acl -Path $tempUserConfig -AclObject $acl
+  } catch {
+    Write-Warning "Could not tighten ACL on the temp npm config; continuing."
+  }
+
+  $env:NPM_CONFIG_USERCONFIG = $tempUserConfig
+  Write-Host "npm auth configured from $tokenSource (temp config; ~/.npmrc NOT modified)" -ForegroundColor Green
+} else {
+  Write-Host "No NPM_TOKEN found - relying on ambient ~/.npmrc auth." -ForegroundColor DarkYellow
+}
+# --------------------------------------------------------------------------------------
+
+
 $repoRoot = $PSScriptRoot
 $packageJsonPath = Join-Path $repoRoot "package.json"
 
@@ -152,4 +241,25 @@ catch {
 }
 finally {
   Pop-Location
+}
+
+}
+finally {
+  # Runs on EVERY exit path. Note this only removes state THIS script created: the temp
+  # config file and the env var it set. ~/.npmrc was never written, so there is nothing
+  # in it to restore.
+
+  # Restore the caller's NPM_CONFIG_USERCONFIG exactly as we found it (including unset),
+  # so a parent publish-all.ps1 run keeps its own temp config.
+  if ($null -eq $previousUserConfigEnv) {
+    Remove-Item Env:\NPM_CONFIG_USERCONFIG -ErrorAction SilentlyContinue
+  } else {
+    $env:NPM_CONFIG_USERCONFIG = $previousUserConfigEnv
+  }
+
+  if ($tempUserConfig -and (Test-Path $tempUserConfig)) {
+    # Overwrite before unlinking so the credential does not linger in free space.
+    try { Set-Content -Path $tempUserConfig -Value "" -Encoding ASCII -ErrorAction SilentlyContinue } catch { }
+    Remove-Item -Path $tempUserConfig -Force -ErrorAction SilentlyContinue
+  }
 }
