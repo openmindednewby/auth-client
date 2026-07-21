@@ -82,7 +82,15 @@ if ($tokenToUse) {
   if (Test-Path $realUserConfig) {
     $carriedLines = Get-Content -Path $realUserConfig | Where-Object { $_ -notmatch '_authToken' }
   }
-  Set-Content -Path $tempUserConfig -Value ($carriedLines + "//registry.npmjs.org/:_authToken=$tokenToUse") -Encoding ASCII
+  # @(...) FORCES an array. WITHOUT it, a ~/.npmrc holding exactly ONE non-authToken line makes
+  # Get-Content return a scalar STRING, so '+' CONCATENATES instead of appending and the temp
+  # config collapses to a single corrupt line:
+  #   legacy-peer-deps=true//registry.npmjs.org/:_authToken=<token>
+  # npm then finds NO token and publish dies with 'ENEEDAUTH need auth' -- while the script has
+  # already printed "npm auth configured", so the log says auth succeeded. This silently blocked
+  # every publish on a machine whose ~/.npmrc had one setting line; @dloizides/ui-layout@1.14.0
+  # was bumped and committed but never reached npm because of it.
+  Set-Content -Path $tempUserConfig -Value (@($carriedLines) + "//registry.npmjs.org/:_authToken=$tokenToUse") -Encoding ASCII
 
   # Restrict the temp file to the current user - it holds a live credential.
   try {
