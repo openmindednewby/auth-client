@@ -618,6 +618,100 @@ describe('BffAuthClient.getLoginConfig', () => {
 
     expect(config.demo).toBeNull();
   });
+
+  // ── multi-account demo (publishedAccounts, additive) ────────────────────────
+
+  // Back-compat regression: a legacy wire with NO publishedAccounts field must
+  // still parse to the bare { username, password } shape — no accounts key.
+  it('omits publishedAccounts for a legacy single-pair wire', async () => {
+    const mock = createMockHttp({
+      status: 200,
+      ok: true,
+      data: {
+        methods: ['password'],
+        demo: { publishedUsername: 'demo', publishedPassword: 'ZygosDemo!2026.Try' },
+      },
+    });
+    const client = new BffAuthClient({ http: mock.http });
+
+    const config = await client.getLoginConfig();
+
+    expect(config.demo).toEqual({ username: 'demo', password: 'ZygosDemo!2026.Try' });
+    expect(config.demo?.publishedAccounts).toBeUndefined();
+  });
+
+  it('parses the publishedAccounts list, keeping labels and order', async () => {
+    const mock = createMockHttp({
+      status: 200,
+      ok: true,
+      data: {
+        methods: ['password'],
+        demo: {
+          publishedUsername: 'master',
+          publishedPassword: 'Master!2026',
+          publishedAccounts: [
+            { label: 'Master', username: 'master', password: 'Master!2026' },
+            { label: 'Merchant', username: 'demo', password: 'Demo!2026' },
+          ],
+        },
+      },
+    });
+    const client = new BffAuthClient({ http: mock.http });
+
+    const config = await client.getLoginConfig();
+
+    expect(config.demo?.username).toBe('master');
+    expect(config.demo?.publishedAccounts).toEqual([
+      { label: 'Master', username: 'master', password: 'Master!2026' },
+      { label: 'Merchant', username: 'demo', password: 'Demo!2026' },
+    ]);
+  });
+
+  it('drops half-filled account entries and defaults a missing label to empty', async () => {
+    const mock = createMockHttp({
+      status: 200,
+      ok: true,
+      data: {
+        methods: ['password'],
+        demo: {
+          publishedUsername: 'master',
+          publishedPassword: 'Master!2026',
+          publishedAccounts: [
+            { username: 'master', password: 'Master!2026' },
+            { label: 'Broken', username: 'half' },
+          ],
+        },
+      },
+    });
+    const client = new BffAuthClient({ http: mock.http });
+
+    const config = await client.getLoginConfig();
+
+    expect(config.demo?.publishedAccounts).toEqual([
+      { label: '', username: 'master', password: 'Master!2026' },
+    ]);
+  });
+
+  it('ignores an empty or all-invalid publishedAccounts list (falls back to the pair)', async () => {
+    const mock = createMockHttp({
+      status: 200,
+      ok: true,
+      data: {
+        methods: ['password'],
+        demo: {
+          publishedUsername: 'demo',
+          publishedPassword: 'ZygosDemo!2026.Try',
+          publishedAccounts: [],
+        },
+      },
+    });
+    const client = new BffAuthClient({ http: mock.http });
+
+    const config = await client.getLoginConfig();
+
+    expect(config.demo).toEqual({ username: 'demo', password: 'ZygosDemo!2026.Try' });
+    expect(config.demo?.publishedAccounts).toBeUndefined();
+  });
 });
 
 describe('BffAuthClient.enrollDevicePin', () => {

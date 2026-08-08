@@ -1,5 +1,32 @@
 # Changelog
 
+## 4.4.0 (2026-08-09)
+
+Additive release: **multiple published demo accounts**. `BffLoginConfig.demo`
+grows an optional `publishedAccounts` list so a BFF (running Bff.AspNetCore
+1.17.0+) can advertise more than one demo persona. Purely additive — a legacy
+single-pair wire parses exactly as before.
+
+### Added
+
+- **`DemoCredentials.publishedAccounts?: DemoAccount[]`** — the full list of
+  published demo accounts, in order, when the BFF advertises them. Absent
+  (`undefined`) for an older BFF that omits the wire field.
+- **`DemoAccount`** (`{ label, username, password }`) — exported type. Nested on
+  the wire under `demo.publishedAccounts[]` with plain `label`/`username`/
+  `password` names. `label` may be `''` (e.g. the entry synthesised from a
+  legacy single pair).
+
+### Parsing — fail closed, backward-compatible by omission
+
+`getLoginConfig` reads `publishedAccounts` ONLY when it is a non-empty array;
+each entry is kept only when it has a non-empty `username` AND `password`
+(half-filled entries are dropped, `label` defaults to `''`). An absent, empty,
+or all-invalid list leaves `demo` as the bare `{ username, password }` pair — so
+`demo.publishedAccounts === undefined` for every existing single-account BFF and
+those consumers are unchanged. `username` / `password` continue to equal the
+first account.
+
 ## 4.2.0 (2026-07-17)
 
 Additive release surfacing **published demo credentials** on `BffLoginConfig`, so

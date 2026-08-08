@@ -163,6 +163,35 @@ export interface BffDeviceState {
  * whole `demo` field is `null` (fail closed).
  */
 export interface DemoCredentials {
+  /** The demo account's username. Equal to `publishedAccounts[0].username` when a list is present. */
+  username: string;
+  /** The demo account's password. Equal to `publishedAccounts[0].password` when a list is present. */
+  password: string;
+  /**
+   * The full list of published demo accounts, in order, when the BFF advertises
+   * more than one (or advertises them in the list form). Present only for a BFF
+   * running Bff.AspNetCore 1.17.0+; an older BFF omits the wire field and this is
+   * `undefined`, in which case `username` / `password` above are the sole account.
+   *
+   * Consumers that render one row per account should read this when present and
+   * otherwise wrap `{ username, password }` into a single-element list — so a
+   * legacy single-account deployment renders exactly as it always did.
+   */
+  publishedAccounts?: DemoAccount[];
+}
+
+/**
+ * One published demo account within {@link DemoCredentials.publishedAccounts}.
+ *
+ * The wire nests these under `demo.publishedAccounts[]` with the plain
+ * `label` / `username` / `password` names (they are already unmistakably public
+ * inside the published array, so they carry no `published*` prefix). `label` may
+ * be an empty string — notably for the one entry synthesised from a legacy
+ * single pair — in which case a renderer shows no per-account header.
+ */
+export interface DemoAccount {
+  /** Human-readable label for this account (e.g. `"Master"`). May be empty. */
+  label: string;
   /** The demo account's username. */
   username: string;
   /** The demo account's password. */
@@ -391,7 +420,42 @@ function parseDemo(body: Record<string, unknown>): DemoCredentials | null {
   if (username === null || password === null) {
     return null;
   }
-  return { username, password };
+  const publishedAccounts = parsePublishedAccounts(raw);
+  return publishedAccounts === null
+    ? { username, password }
+    : { username, password, publishedAccounts };
+}
+
+/**
+ * Parse the optional `publishedAccounts` list off the `demo` block — FAIL CLOSED,
+ * and BACKWARD-COMPATIBLE by omission.
+ *
+ * A BFF older than 1.17.0 omits the field entirely; this returns `null` so
+ * `parseDemo` yields the legacy `{ username, password }` shape unchanged. When
+ * the field is present it is filtered to entries that carry a non-empty username
+ * AND password (a half-filled entry is dropped, never rendered as a blank row),
+ * with `label` defaulted to `''`. An empty or all-dropped list resolves to `null`
+ * rather than `[]`, so the fallback single account applies.
+ */
+function parsePublishedAccounts(raw: Record<string, unknown>): DemoAccount[] | null {
+  const list = raw.publishedAccounts;
+  if (!Array.isArray(list)) {
+    return null;
+  }
+  const parsed = list.reduce<DemoAccount[]>((accounts, entry) => {
+    if (!isRecord(entry)) {
+      return accounts;
+    }
+    const username = readOptionalString(entry, 'username');
+    const password = readOptionalString(entry, 'password');
+    if (username === null || password === null) {
+      return accounts;
+    }
+    const label = readOptionalString(entry, 'label') ?? '';
+    accounts.push({ label, username, password });
+    return accounts;
+  }, []);
+  return parsed.length === 0 ? null : parsed;
 }
 
 /** Parse a full `GET /bff/config` body into a `BffLoginConfig`, falling back defensively. */
