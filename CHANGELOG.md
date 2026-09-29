@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.5.0 (2026-09-29)
+
+Failed state-changing BFF calls (`login`, `logout`, `register`, `forgot-password`, `reset-password`) now throw
+`BffRequestError` carrying `status` and the body `errorCode` (e.g. `USER_EXISTS`, `TENANT_NAME_TAKEN`, 429,
+`AUTO_LOGIN_FAILED`). The message text is unchanged. A register response without a user throws it with
+`status: null` and the body `errorCode`. New exports: `BffRequestError`, `isBffRequestError`, `readBffErrorCode`.
+
 ## 4.4.0 (2026-08-09)
 
 Additive release: **multiple published demo accounts**. `BffLoginConfig.demo`

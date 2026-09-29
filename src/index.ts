@@ -124,6 +124,7 @@ export {
   type DevicePinEnrollResult,
   type DevicePinUnlockResult,
 } from './bff/BffAuthClient';
+export { BffRequestError, isBffRequestError, readBffErrorCode } from './bff/BffRequestError';
 
 // Pure helpers
 export { normalizeKeycloakUser } from './utils/normalizeKeycloakUser';

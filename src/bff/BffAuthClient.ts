@@ -1,4 +1,5 @@
 import type { HttpClient, HttpResponse } from '../http/HttpClient';
+import { BffRequestError, readBffErrorCode } from './BffRequestError';
 
 /**
  * Same-origin client for a per-app **Backend-For-Frontend** (`bff-katalogos`,
@@ -611,7 +612,8 @@ export class BffAuthClient {
     const data = await this.postState(ENDPOINTS.register, request, 'register');
     const user = extractUser(data);
     if (user === null) {
-      throw new Error('register: BFF response missing user');
+      // e.g. a 201 whose body says AUTO_LOGIN_FAILED: the account exists, the session does not.
+      throw new BffRequestError('register: BFF response missing user', null, readBffErrorCode(data));
     }
     return user;
   }
@@ -807,7 +809,11 @@ export class BffAuthClient {
   private async postState(path: string, body: object | undefined, label: string): Promise<unknown> {
     const response = await this.postRaw(path, body);
     if (!response.ok) {
-      throw new Error(`${label} failed with status ${String(response.status)}`);
+      throw new BffRequestError(
+        `${label} failed with status ${String(response.status)}`,
+        response.status,
+        readBffErrorCode(response.data),
+      );
     }
     return response.data;
   }
