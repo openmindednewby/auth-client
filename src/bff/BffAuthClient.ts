@@ -1,5 +1,8 @@
 import type { HttpClient, HttpResponse } from '../http/HttpClient';
 import { BffRequestError, readBffErrorCode } from './BffRequestError';
+import { toBffUser, type BffUser, type BffWireUser } from './BffUser';
+
+export type { BffUser, BffWireUser } from './BffUser';
 
 /**
  * Same-origin client for a per-app **Backend-For-Frontend** (`bff-katalogos`,
@@ -275,27 +278,9 @@ export interface BffOtpRequestResult {
   code: string | null;
 }
 
-/**
- * The user object returned by `GET /bff/me` and `POST /bff/login`. The BFF
- * returns the sanitised KC claims under a `user` envelope and **never** a
- * token. Kept permissive so server-added claims flow through without a bump.
- */
-export interface BffUser {
-  sub?: string;
-  email?: string;
-  email_verified?: boolean;
-  name?: string;
-  preferred_username?: string;
-  given_name?: string;
-  family_name?: string;
-  tenantId?: string;
-  roles?: string[];
-  [key: string]: unknown;
-}
-
 /** Envelope shape the BFF auth endpoints respond with: `{ user: {...} }`. */
 interface BffUserEnvelope {
-  user?: BffUser;
+  user?: BffWireUser;
 }
 
 export interface BffAuthClientOptions {
@@ -318,7 +303,7 @@ function extractUser(data: unknown): BffUser | null {
     return null;
   }
   const envelope = data as BffUserEnvelope;
-  return isRecord(envelope.user) ? envelope.user : null;
+  return isRecord(envelope.user) ? toBffUser(envelope.user) : null;
 }
 
 /**

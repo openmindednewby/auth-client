@@ -1,5 +1,11 @@
 # Changelog
 
+## 4.6.0 (2026-11-17)
+
+`/bff/me` and the sign-in calls send `roles` as a bare string when the user has one role. The user
+`BffAuthClient` returns now always carries `roles` as a `string[]` (empty when absent). New exports:
+`BffWireUser` (the wire shape, `roles` string or array) and the `BffUser` type moved to `bff/BffUser`.
+
 ## 4.5.0 (2026-09-29)
 
 Failed state-changing BFF calls (`login`, `logout`, `register`, `forgot-password`, `reset-password`) now throw

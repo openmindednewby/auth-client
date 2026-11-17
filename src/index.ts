@@ -119,6 +119,7 @@ export {
   type BffRegisterRequest,
   type BffResetPasswordRequest,
   type BffUser,
+  type BffWireUser,
   type DemoAccount,
   type DemoCredentials,
   type DevicePinEnrollResult,
